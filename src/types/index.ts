@@ -122,3 +122,56 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+// Claude plan usage, from the local `claude-usage --json` CLI (schema claude-usage.summary.v1).
+export interface ClaudeUsageWindow {
+  used_pct: number | null;
+  last_used_pct: number;
+  resets_at: string | null;
+  observed_at: string;
+  age_s: number;
+  state: "current" | "stale" | "reset";
+  source: "usage" | "statusline" | "pool" | string;
+}
+
+export interface ClaudeUsageAccount {
+  account: string;
+  /** Email the host's Claude Code is signed in to (null until a probe reads it). */
+  email?: string | null;
+  five_hour: ClaudeUsageWindow | null;
+  seven_day: ClaudeUsageWindow | null;
+  model_weeks?: Record<string, ClaudeUsageWindow>;
+  pool_spend_today_usd: number | null;
+  probe_error?: string | null;
+}
+
+export interface ClaudeWorkerRoute {
+  route: string;
+  runs: number;
+  held: number;
+  failed: number;
+  cost_usd: number;
+}
+
+export interface ClaudeUsageSummary {
+  schema: "claude-usage.summary.v1";
+  generated_at: string;
+  accounts: ClaudeUsageAccount[];
+  workers: {
+    date_utc: string;
+    runs: number;
+    held: number;
+    cost_usd: number;
+    by_route: ClaudeWorkerRoute[];
+  };
+  local_tokens: {
+    total_tokens?: number;
+    output_tokens?: number;
+    cache_read_tokens?: number;
+    models?: string[];
+    unpriced_models?: string[];
+    error?: string | null;
+    refreshing?: boolean;
+  };
+  notes?: string[];
+}

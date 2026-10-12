@@ -7,7 +7,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { AccountCard, AddAccountModal, ClaudeUsagePanel, UpdateChecker } from "./components";
 import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -43,6 +43,25 @@ import {
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import "./App.css";
+
+type AppView = "codex" | "claude";
+const VIEW_STORAGE_KEY = "codex-switcher.view";
+
+function readStoredView(): AppView {
+  try {
+    return localStorage.getItem(VIEW_STORAGE_KEY) === "claude" ? "claude" : "codex";
+  } catch {
+    return "codex";
+  }
+}
+
+function storeView(view: AppView) {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, view);
+  } catch {
+    // Storage can be unavailable (private mode); the view just won't persist.
+  }
+}
 
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
 const AUTO_WARMUP_RETRY_BACKOFF_MS = 60 * 1000;
@@ -197,6 +216,11 @@ function App() {
   const [configModalError, setConfigModalError] = useState<string | null>(null);
   const [configCopied, setConfigCopied] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
+  const [view, setView] = useState<AppView>(readStoredView);
+  const selectView = useCallback((next: AppView) => {
+    setView(next);
+    storeView(next);
+  }, []);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
   const [pendingSwitchAccountId, setPendingSwitchAccountId] = useState<string | null>(null);
@@ -1408,6 +1432,26 @@ function App() {
                   <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">
                     Codex Switcher
                   </h1>
+                  <div
+                    role="tablist"
+                    aria-label="Choose view"
+                    className="inline-flex rounded-lg border border-gray-200 p-0.5 text-xs dark:border-gray-700"
+                  >
+                    {(["codex", "claude"] as const).map((v) => (
+                      <button
+                        key={v}
+                        role="tab"
+                        aria-selected={view === v}
+                        onClick={() => selectView(v)}
+                        className={`rounded-md px-2.5 py-1 font-medium transition-colors ${view === v
+                            ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
+                            : "text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+                          }`}
+                      >
+                        {v === "codex" ? "Codex" : "Claude"}
+                      </button>
+                    ))}
+                  </div>
                   {processInfo && (
                     <div className="inline-flex items-center gap-1">
                       <span
@@ -1726,7 +1770,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
-        {loading && accounts.length === 0 ? (
+        {view === "claude" ? (
+          <ClaudeUsagePanel masked={allMasked} />
+        ) : loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
             <p className="text-gray-500 dark:text-gray-400">Loading accounts...</p>
