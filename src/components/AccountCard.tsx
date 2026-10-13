@@ -84,7 +84,7 @@ function getSubscriptionStatus(timestamp: string | null | undefined): {
   };
 }
 
-function BlurredText({ children, blur }: { children: React.ReactNode; blur: boolean }) {
+export function BlurredText({ children, blur }: { children: React.ReactNode; blur: boolean }) {
   return (
     <span
       className={`transition-all duration-200 select-none ${blur ? "blur-sm" : ""}`}

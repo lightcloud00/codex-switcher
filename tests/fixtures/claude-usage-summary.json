@@ -1,0 +1,152 @@
+{
+ "accounts": [
+  {
+   "account": "mac-max",
+   "email": "mac-max@example.com",
+   "five_hour": {
+    "age_s": 203,
+    "last_used_pct": 59.0,
+    "observed_at": "2026-10-11T17:18:35Z",
+    "resets_at": "2026-10-11T19:50:00Z",
+    "source": "usage",
+    "state": "current",
+    "used_pct": 59.0
+   },
+   "model_weeks": {
+    "Fable": {
+     "age_s": 203,
+     "last_used_pct": 0.0,
+     "observed_at": "2026-10-11T17:18:35Z",
+     "resets_at": "2026-10-14T20:00:00Z",
+     "source": "usage",
+     "state": "current",
+     "used_pct": 0.0
+    }
+   },
+   "pool_spend_today_usd": null,
+   "probe_error": null,
+   "seven_day": {
+    "age_s": 203,
+    "last_used_pct": 41.0,
+    "observed_at": "2026-10-11T17:18:35Z",
+    "resets_at": "2026-10-14T20:00:00Z",
+    "source": "usage",
+    "state": "current",
+    "used_pct": 41.0
+   }
+  },
+  {
+   "account": "windows-max",
+   "email": "windows-max@example.com",
+   "five_hour": {
+    "age_s": 203,
+    "last_used_pct": 2.0,
+    "observed_at": "2026-10-11T17:18:35Z",
+    "resets_at": "2026-10-11T18:39:00Z",
+    "source": "usage",
+    "state": "current",
+    "used_pct": 2.0
+   },
+   "model_weeks": {
+    "Fable": {
+     "age_s": 203,
+     "last_used_pct": 0.0,
+     "observed_at": "2026-10-11T17:18:35Z",
+     "resets_at": "2026-10-11T18:00:00Z",
+     "source": "usage",
+     "state": "current",
+     "used_pct": 0.0
+    }
+   },
+   "pool_spend_today_usd": 0.7439,
+   "probe_error": null,
+   "seven_day": {
+    "age_s": 203,
+    "last_used_pct": 83.0,
+    "observed_at": "2026-10-11T17:18:35Z",
+    "resets_at": "2026-10-11T17:59:00Z",
+    "source": "usage",
+    "state": "current",
+    "used_pct": 83.0
+   }
+  },
+  {
+   "account": "wsl-max",
+   "five_hour": {
+    "age_s": 203,
+    "last_used_pct": 0.0,
+    "observed_at": "2026-10-11T17:18:35Z",
+    "resets_at": "2026-10-11T18:30:00Z",
+    "source": "usage",
+    "state": "current",
+    "used_pct": 0.0
+   },
+   "model_weeks": {
+    "Fable": {
+     "age_s": 203,
+     "last_used_pct": 0.0,
+     "observed_at": "2026-10-11T17:18:35Z",
+     "resets_at": "2026-10-15T19:00:00Z",
+     "source": "usage",
+     "state": "current",
+     "used_pct": 0.0
+    }
+   },
+   "pool_spend_today_usd": null,
+   "probe_error": null,
+   "seven_day": {
+    "age_s": 203,
+    "last_used_pct": 27.0,
+    "observed_at": "2026-10-11T17:18:35Z",
+    "resets_at": "2026-10-15T19:00:00Z",
+    "source": "usage",
+    "state": "current",
+    "used_pct": 27.0
+   }
+  }
+ ],
+ "generated_at": "2026-10-11T17:21:58Z",
+ "local_tokens": {
+  "cache_read_tokens": 2509462236,
+  "cache_write_tokens": 50314431,
+  "cached_at": 1791739194.9108028,
+  "date": "2026-10-11",
+  "error": null,
+  "input_tokens": 21034,
+  "models": [
+   "claude-haiku-4-5-20251001",
+   "claude-haiku-5-5",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5"
+  ],
+  "output_tokens": 5483038,
+  "total_tokens": 2565280739,
+  "unpriced_models": [
+   "claude-haiku-5-5",
+   "claude-opus-5-5",
+   "claude-sonnet-5-5"
+  ]
+ },
+ "notes": [
+  "Percentages come from Claude Code itself: each host's own `claude -p /usage` (0 tokens), statusline rate_limits and pool rate_limit_event data. No credentials are read or moved and no account is switched.",
+  "Dollar figures are Claude Code's own per-run estimates. ccusage token totals cover this Mac's logs only; it cannot price models it does not know (listed as unpriced)."
+ ],
+ "schema": "claude-usage.summary.v1",
+ "sources": {
+  "pool_error": null,
+  "probed_accounts": [
+   "mac-max",
+   "windows-max",
+   "wsl-max"
+  ],
+  "statusline_accounts": []
+ },
+ "workers": {
+  "by_route": [],
+  "cost_usd": 0,
+  "date_utc": "2026-10-11",
+  "held": 0,
+  "recent": [],
+  "runs": 0
+ }
+}
