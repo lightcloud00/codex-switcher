@@ -1,0 +1,41 @@
+{
+  "comment": "Known Claude seats, shared by the UI (src/lib/claudeUsage.ts) and the capacity exporter (src-tauri/src/commands/claude_usage.rs). usage_labels are the account names claude-usage reports for the seat; launcher is the command that starts Claude on that seat. The fleet seat registry stays the source of truth for which seats exist; this table only adds the usage labels and launcher, and keeps a seat visible before the registry lists it.",
+  "near_limit_pct": 95,
+  "seats": [
+    {
+      "id": "claude-mac-gustavo",
+      "host": "mac",
+      "plan": "max",
+      "usage_labels": ["mac-max", "claude-gustavo"],
+      "launcher": "claude-gustavo"
+    },
+    {
+      "id": "claude-mac-main",
+      "host": "mac",
+      "plan": "max",
+      "usage_labels": ["mac-main-max", "claude-main"],
+      "launcher": "claude-main"
+    },
+    {
+      "id": "claude-mac-096",
+      "host": "mac",
+      "plan": "max",
+      "usage_labels": ["mac-096-max", "claude-096"],
+      "launcher": "claude-096"
+    },
+    {
+      "id": "claude-windows",
+      "host": "win",
+      "plan": "max",
+      "usage_labels": ["windows-max"],
+      "launcher": "fleet-summon win claude sonnet"
+    },
+    {
+      "id": "claude-wsl",
+      "host": "wsl",
+      "plan": "max",
+      "usage_labels": ["wsl-max"],
+      "launcher": "fleet-summon wsl claude sonnet --account claude-wsl"
+    }
+  ]
+}

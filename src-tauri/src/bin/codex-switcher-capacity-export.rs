@@ -10,6 +10,10 @@ fn argument(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn flag(name: &str) -> bool {
+    std::env::args_os().skip(1).any(|value| value == name)
+}
+
 #[tokio::main]
 async fn main() {
     let output = argument("--output").unwrap_or_else(|| {
@@ -17,9 +21,14 @@ async fn main() {
         std::process::exit(2);
     });
     let admission = argument("--admission");
-    if codex_switcher_lib::capacity_export::export_capacity(&output, admission.as_deref())
-        .await
-        .is_err()
+    let include_claude_seats = flag("--include-claude-seats");
+    if codex_switcher_lib::capacity_export::export_capacity(
+        &output,
+        admission.as_deref(),
+        include_claude_seats,
+    )
+    .await
+    .is_err()
     {
         // Keep every CLI error path identity- and credential-free. Detailed
         // backend errors stay inside the Switcher trust boundary.

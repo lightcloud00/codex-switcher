@@ -1,18 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invokeBackend } from "../lib/platform";
 import { BlurredText } from "./AccountCard";
 import {
-  accountSubtitle,
-  accountTitle,
+  buildClaudeSeats,
   formatPct,
   formatTokens,
+  hostLabel,
+  planLabel,
   resetCountdown,
+  seatStatusLabel,
+  seatSubtitle,
+  seatTitle,
   stateLabel,
   updatedAgo,
   windowTone,
   type WindowTone,
 } from "../lib/claudeUsage";
-import type { ClaudeUsageAccount, ClaudeUsageSummary, ClaudeUsageWindow } from "../types";
+import type {
+  ClaudeSeat,
+  ClaudeSeatRegistry,
+  ClaudeSeatStatus,
+  ClaudeUsageSummary,
+  ClaudeUsageWindow,
+} from "../types";
 
 const REFRESH_MS = 60_000;
 
@@ -53,35 +63,93 @@ function LimitBar({ label, w, now }: { label: string; w: ClaudeUsageWindow | nul
   );
 }
 
-function AccountCardClaude({ a, now, masked }: { a: ClaudeUsageAccount; now: number; masked: boolean }) {
-  const modelWeeks = Object.entries(a.model_weeks ?? {});
-  const subtitle = accountSubtitle(a);
+const BADGE_NEUTRAL = "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300";
+
+const STATUS_BADGE: Record<ClaudeSeatStatus, string> = {
+  ok: "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
+  near_limit: "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300",
+  exhausted: "bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300",
+  unknown: BADGE_NEUTRAL,
+  no_usage_yet: BADGE_NEUTRAL,
+};
+
+function CopyLauncherButton({ command }: { command: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const copy = () => {
+    void navigator.clipboard
+      .writeText(command)
+      .then(() => setState("copied"))
+      .catch(() => setState("failed"))
+      .finally(() => window.setTimeout(() => setState("idle"), 2000));
+  };
+  return (
+    <button
+      onClick={copy}
+      title={command}
+      className="h-7 rounded-lg border border-gray-200 px-2.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-neutral-900"
+    >
+      {state === "copied" ? "Copied" : state === "failed" ? "Clipboard unavailable" : "Copy launcher command"}
+    </button>
+  );
+}
+
+function SeatCard({ seat, now, masked }: { seat: ClaudeSeat; now: number; masked: boolean }) {
+  const modelWeeks = Object.entries(seat.modelWeeks);
+  const subtitle = seatSubtitle(seat);
+  const plan = planLabel(seat.plan);
+  const noUsage = seat.status === "no_usage_yet";
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="mb-3 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <h3 className="truncate font-semibold text-gray-900 dark:text-gray-100">
-            <BlurredText blur={masked}>{accountTitle(a)}</BlurredText>
+            <BlurredText blur={masked}>{seatTitle(seat)}</BlurredText>
           </h3>
-          {subtitle && <div className="text-xs text-gray-500 dark:text-gray-400">{subtitle}</div>}
+          {subtitle && (
+            <div className="text-xs text-gray-500 dark:text-gray-400" title={seat.usageAccount ?? undefined}>
+              {subtitle}
+            </div>
+          )}
         </div>
-        {a.pool_spend_today_usd ? (
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            Pool spend today ${a.pool_spend_today_usd.toFixed(2)}
-          </span>
-        ) : null}
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <div className="flex items-center gap-1.5">
+            {plan && (
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${BADGE_NEUTRAL}`}>{plan}</span>
+            )}
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_BADGE[seat.status]}`}>
+              {seatStatusLabel(seat.status)}
+            </span>
+          </div>
+          {seat.poolSpendTodayUsd ? (
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              Pool spend today ${seat.poolSpendTodayUsd.toFixed(2)}
+            </span>
+          ) : null}
+        </div>
       </div>
-      <div className="space-y-2">
-        <LimitBar label="5-hour" w={a.five_hour} now={now} />
-        <LimitBar label="Week" w={a.seven_day} now={now} />
-      </div>
+      {noUsage ? (
+        <div className="text-xs italic text-gray-500 dark:text-gray-400">
+          No usage recorded for this seat yet{seat.host ? ` on ${hostLabel(seat.host)}` : ""}.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <LimitBar label="5-hour" w={seat.fiveHour} now={now} />
+          <LimitBar label="Week" w={seat.sevenDay} now={now} />
+        </div>
+      )}
       {modelWeeks.length > 0 && (
         <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
           {modelWeeks.map(([label, w]) => `${label} week ${formatPct(w)}`).join(" · ")}
         </div>
       )}
-      {a.probe_error && (
-        <div className="mt-2 text-xs italic text-amber-600 dark:text-amber-400">{a.probe_error}</div>
+      {seat.probeError && (
+        <div className="mt-2 text-xs italic text-amber-600 dark:text-amber-400">{seat.probeError}</div>
+      )}
+      {seat.launcher && (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <code className="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400">{seat.launcher}</code>
+          <CopyLauncherButton command={seat.launcher} />
+        </div>
       )}
     </div>
   );
@@ -89,6 +157,7 @@ function AccountCardClaude({ a, now, masked }: { a: ClaudeUsageAccount; now: num
 
 export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
   const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
+  const [registry, setRegistry] = useState<ClaudeSeatRegistry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -96,7 +165,13 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setSummary(await invokeBackend<ClaudeUsageSummary>("get_claude_usage"));
+      // The registry is optional: a backend without it (or an error) leaves the tab usage-only.
+      const [usage, seats] = await Promise.all([
+        invokeBackend<ClaudeUsageSummary>("get_claude_usage"),
+        invokeBackend<ClaudeSeatRegistry>("get_claude_seats").catch(() => null),
+      ]);
+      setSummary(usage);
+      setRegistry(seats);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -112,6 +187,10 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     return () => window.clearInterval(id);
   }, [load]);
 
+  const seats = useMemo(
+    () => (summary ? buildClaudeSeats(registry?.found ? registry.seats : null, summary.accounts) : []),
+    [summary, registry],
+  );
   const tokens = summary?.local_tokens;
   const workers = summary?.workers;
 
@@ -119,7 +198,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Claude plans</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Claude seats</h2>
           <p className="text-xs text-gray-500 dark:text-gray-400">
             {summary ? `Updated ${updatedAgo(summary.generated_at, now)}` : "Reading Claude usage..."}
           </p>
@@ -148,10 +227,15 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
       {summary && (
         <>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {summary.accounts.map((a) => (
-              <AccountCardClaude key={a.account} a={a} now={now} masked={masked} />
+            {seats.map((seat) => (
+              <SeatCard key={seat.id} seat={seat} now={now} masked={masked} />
             ))}
           </div>
+          {registry && !registry.found && (
+            <p className="text-xs italic text-gray-500 dark:text-gray-400">
+              {registry.error ?? "Seat registry not found"}. Showing the accounts claude-usage reports.
+            </p>
+          )}
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div className="rounded-2xl border border-gray-200 p-4 text-sm dark:border-gray-800">
@@ -188,8 +272,8 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
       )}
 
       <p className="text-xs text-gray-400 dark:text-gray-500">
-        Read-only: the numbers come from Claude Code's own /usage on each machine. No Claude credentials are
-        read or switched.
+        Read-only: seats come from the fleet seat registry and the numbers from Claude Code's own /usage on
+        each machine. No Claude credentials are read or switched.
       </p>
     </div>
   );
