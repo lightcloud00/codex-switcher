@@ -175,3 +175,40 @@ export interface ClaudeUsageSummary {
   };
   notes?: string[];
 }
+
+// Claude seats: the fleet seat registry (get_claude_seats) merged with claude-usage readings.
+export type ClaudeSeatStatus = "ok" | "near_limit" | "exhausted" | "unknown" | "no_usage_yet";
+
+/** One Claude entry of the fleet seat registry; the backend drops everything but these fields. */
+export interface ClaudeSeatRegistryEntry {
+  id: string;
+  host: string | null;
+  plan: string | null;
+}
+
+export interface ClaudeSeatRegistry {
+  /** False when the registry file is missing or unreadable; the tab then shows usage-only cards. */
+  found: boolean;
+  seats: ClaudeSeatRegistryEntry[];
+  error?: string | null;
+}
+
+export interface ClaudeSeat {
+  /** Registry seat id ("claude-mac-096"); the claude-usage account label in usage-only mode. */
+  id: string;
+  /** "mac", "win" or "wsl" when known. */
+  host: string | null;
+  plan: string | null;
+  email: string | null;
+  /** The claude-usage account label this seat's readings came from. */
+  usageAccount: string | null;
+  fiveHour: ClaudeUsageWindow | null;
+  sevenDay: ClaudeUsageWindow | null;
+  modelWeeks: Record<string, ClaudeUsageWindow>;
+  poolSpendTodayUsd: number | null;
+  probeError: string | null;
+  status: ClaudeSeatStatus;
+  /** Shell command that starts Claude on this seat; null when none is known. */
+  launcher: string | null;
+  inRegistry: boolean;
+}

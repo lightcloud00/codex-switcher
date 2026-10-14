@@ -1,0 +1,50 @@
+{
+  "schema": "aos.subscription_accounts.v1",
+  "accounts": [
+    {
+      "id": "codex-mac",
+      "host": "mac",
+      "cli": "codex",
+      "profile": "/home/example/.codex",
+      "binary": "/home/example/bin/codex",
+      "identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expected_plan": "pro"
+    },
+    {
+      "id": "claude-mac-main",
+      "host": "mac",
+      "cli": "claude",
+      "profile": "/home/example/.claude-profiles/main",
+      "binary": "/home/example/bin/claude",
+      "identity_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected_plan": "max"
+    },
+    {
+      "id": "claude-mac-gustavo",
+      "host": "mac",
+      "cli": "claude",
+      "profile": "/home/example/.claude-profiles/gustavo",
+      "binary": "/home/example/bin/claude",
+      "identity_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "expected_plan": "max"
+    },
+    {
+      "id": "claude-windows",
+      "host": "win",
+      "cli": "claude",
+      "profile": "C:\\Users\\example\\.claude",
+      "binary": "C:\\example\\claude.cmd",
+      "identity_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "expected_plan": "max"
+    },
+    {
+      "id": "claude-wsl",
+      "host": "wsl",
+      "cli": "claude",
+      "profile": "/home/example/.claude",
+      "binary": "/home/example/.npm-global/bin/claude",
+      "identity_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "expected_plan": "max"
+    }
+  ]
+}
