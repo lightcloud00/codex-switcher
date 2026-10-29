@@ -6,7 +6,7 @@
       "id": "claude-mac-gustavo",
       "host": "mac",
       "plan": "max",
-      "usage_labels": ["mac-max", "claude-gustavo"],
+      "usage_labels": ["mac-gustavo-max", "claude-gustavo"],
       "launcher": "claude-gustavo"
     },
     {

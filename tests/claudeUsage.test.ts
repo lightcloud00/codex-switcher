@@ -118,7 +118,7 @@ test("fixture carries emails for probed accounts only", () => {
   ) as ClaudeUsageSummary;
   assert.deepEqual(
     summary.accounts.map(accountTitle),
-    ["mac-max@example.com", "windows-max@example.com", "wsl-max"],
+    ["mac-gustavo-max@example.com", "windows-max@example.com", "wsl-max"],
   );
 });
 
@@ -202,8 +202,8 @@ test("seats merge the registry with usage by usage label, in fleet order", () =>
   const byId = Object.fromEntries(seats.map((s) => [s.id, s]));
 
   const gustavo = byId["claude-mac-gustavo"];
-  assert.equal(gustavo.usageAccount, "mac-max");
-  assert.equal(gustavo.email, "mac-max@example.com");
+  assert.equal(gustavo.usageAccount, "mac-gustavo-max");
+  assert.equal(gustavo.email, "mac-gustavo-max@example.com");
   assert.equal(gustavo.host, "mac");
   assert.equal(gustavo.plan, "max");
   assert.equal(gustavo.fiveHour?.used_pct, 59);
@@ -253,7 +253,7 @@ test("claude-096 picks up usage under either its seat id or its claude-usage lab
 
 test("near-limit and exhausted seats are flagged from their usage", () => {
   const seats = buildClaudeSeats(registryFixture(), [
-    account("mac-max", 20, 96),
+    account("mac-gustavo-max", 20, 96),
     account("mac-main-max", 100, 40),
     account("windows-max", 5, 100),
     account("wsl-max", 5, 94),
@@ -271,20 +271,20 @@ test("near-limit and exhausted seats are flagged from their usage", () => {
 test("two usage labels for one seat resolve to the one with a reading", () => {
   const seats = buildClaudeSeats(registryFixture(), [
     account("claude-gustavo", null, null),
-    account("mac-max", 17, 6, { email: "gus@example.com" }),
+    account("mac-gustavo-max", 17, 6, { email: "gus@example.com" }),
   ]);
   assert.equal(seats.length, 5);
   const gustavo = seats[0];
   assert.equal(gustavo.id, "claude-mac-gustavo");
-  assert.equal(gustavo.usageAccount, "mac-max");
+  assert.equal(gustavo.usageAccount, "mac-gustavo-max");
   assert.equal(gustavo.sevenDay?.used_pct, 6);
 
   // Reversed order gives the same pick, and a reading-less alias alone still counts as the seat's account.
   const reversed = buildClaudeSeats(registryFixture(), [
-    account("mac-max", 17, 6),
+    account("mac-gustavo-max", 17, 6),
     account("claude-gustavo", null, null),
   ]);
-  assert.equal(reversed[0].usageAccount, "mac-max");
+  assert.equal(reversed[0].usageAccount, "mac-gustavo-max");
   const aliasOnly = buildClaudeSeats(registryFixture(), [account("claude-gustavo", null, null)]);
   assert.equal(aliasOnly[0].usageAccount, "claude-gustavo");
   assert.equal(aliasOnly[0].status, "no_usage_yet");
@@ -322,8 +322,8 @@ test("registry host and plan win over the known-seat table", () => {
 test("without a registry the tab is usage-only, one card per usage account", () => {
   for (const missing of [null, undefined]) {
     const seats = buildClaudeSeats(missing, usageFixture().accounts);
-    assert.deepEqual(seats.map((s) => s.id), ["mac-max", "windows-max", "wsl-max"]);
-    assert.deepEqual(seats.map(seatTitle), ["mac-max@example.com", "windows-max@example.com", "wsl-max"]);
+    assert.deepEqual(seats.map((s) => s.id), ["mac-gustavo-max", "windows-max", "wsl-max"]);
+    assert.deepEqual(seats.map(seatTitle), ["mac-gustavo-max@example.com", "windows-max@example.com", "wsl-max"]);
     assert.deepEqual(seats.map((s) => s.host), ["mac", "win", "wsl"]);
     assert.ok(seats.every((s) => !s.inRegistry && s.plan === null));
     assert.equal(seats[0].launcher, "claude-gustavo");

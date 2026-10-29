@@ -492,7 +492,7 @@ mod tests {
                 .find(|a| a["account"] == name)
                 .map(|a| a["email"].clone())
         };
-        assert_eq!(email("mac-max"), Some(Value::from("mac-max@example.com")));
+        assert_eq!(email("mac-gustavo-max"), Some(Value::from("mac-gustavo-max@example.com")));
         assert_eq!(email("wsl-max"), Some(Value::Null));
     }
 
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn near_limit_and_exhausted_match_the_ui_rules() {
         let accounts = vec![
-            account("mac-max", Some(20.0), Some(96.0)),
+            account("mac-gustavo-max", Some(20.0), Some(96.0)),
             account("mac-main-max", Some(100.0), Some(40.0)),
             account("windows-max", Some(5.0), Some(100.0)),
             account("wsl-max", Some(5.0), Some(94.0)),
@@ -650,6 +650,23 @@ mod tests {
         assert_eq!(status("claude-mac-096"), "no_usage_yet");
         assert_eq!(status("claude-windows"), "exhausted");
         assert_eq!(status("claude-wsl"), "ok");
+    }
+
+    #[test]
+    fn gustavo_seat_reads_mac_gustavo_max_not_the_default_login() {
+        // mac-max reports the claude-main login, a different account from the
+        // claude-gustavo profile; its numbers must not land on claude-mac-gustavo.
+        let accounts = vec![
+            account("mac-gustavo-max", Some(3.0), Some(1.0)),
+            account("mac-max", Some(80.0), Some(90.0)),
+        ];
+        let seats = merge_seats(Some(&registry()), Some(&accounts), fixture_now());
+        let seat = reading(&seats, "claude-mac-gustavo");
+        assert_eq!(seat.used_5h_pct, Some(3.0));
+        assert_eq!(seat.used_7d_pct, Some(1.0));
+        let only_default = vec![account("mac-max", Some(80.0), Some(90.0))];
+        let seats = merge_seats(Some(&registry()), Some(&only_default), fixture_now());
+        assert_eq!(reading(&seats, "claude-mac-gustavo").status, SeatStatus::NoUsageYet);
     }
 
     #[test]
@@ -687,7 +704,7 @@ mod tests {
     fn exhausted_seat_resets_when_its_exhausted_window_does() {
         let accounts = vec![
             // 5-hour exhausted: back at the 5-hour reset, not the weekly one.
-            json!({"account": "mac-max",
+            json!({"account": "mac-gustavo-max",
                 "five_hour": window(Some(100.0), "2026-10-11T19:50:00Z"),
                 "seven_day": window(Some(40.0), "2026-10-14T20:00:00Z")}),
             // Both exhausted: back when the later one resets.
