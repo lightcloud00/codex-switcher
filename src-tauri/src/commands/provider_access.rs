@@ -163,6 +163,32 @@ pub async fn launch_provider(provider: String) -> Result<(), String> {
     if provider != "grok" && provider != "cursor" && provider != "credvault" {
         return Err("Unknown provider".into());
     }
+    #[cfg(not(windows))]
+    if provider == "credvault" {
+        let binary =
+            find_binary("credvault").ok_or("CredVault CLI is not installed on this computer")?;
+        let path = format!(
+            "/opt/homebrew/bin:/usr/local/bin:{}",
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = tokio::process::Command::new(binary);
+        child
+            .arg("status")
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.status())
+            .await
+            .map_err(|_| "CredVault status timed out")?
+            .map_err(|_| "Could not check CredVault")?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err("CredVault status check failed; use the native broker to recover access".into())
+        };
+    }
     #[cfg(target_os = "macos")]
     {
         let app = match provider.as_str() {
