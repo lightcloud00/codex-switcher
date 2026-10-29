@@ -84,6 +84,9 @@ fn find_binary(name: &str) -> Option<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         paths.push(PathBuf::from(appdata).join("npm"));
     }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        paths.push(PathBuf::from(local).join("cursor-agent"));
+    }
     if let Some(path) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&path));
     }
@@ -222,16 +225,24 @@ pub async fn launch_provider(provider: String) -> Result<(), String> {
         let command = match provider.as_str() {
             "grok" => "grok",
             "cursor" => "cursor",
-            _ => "credvault",
+            _ => {
+                if find_binary("credvault").is_some() {
+                    "credvault"
+                } else {
+                    "credvault-mac"
+                }
+            }
         };
         if find_binary(command).is_none() {
             return Err(format!("{command} is not installed on this computer"));
         }
         // The only command text comes from this allowlist, never from renderer input.
-        std::process::Command::new("cmd.exe")
-            .args(["/C", "start", "", "cmd.exe", "/K", command])
-            .spawn()
-            .map_err(|_| "Could not open provider")?;
+        let mut launcher = std::process::Command::new("cmd.exe");
+        launcher.args(["/C", "start", "", "cmd.exe", "/K", command]);
+        if provider == "credvault" {
+            launcher.arg("status");
+        }
+        launcher.spawn().map_err(|_| "Could not open provider")?;
         return Ok(());
     }
     #[cfg(not(any(target_os = "macos", windows)))]
