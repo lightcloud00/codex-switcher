@@ -1,3 +1,4 @@
+import { ProviderAccessPanel } from "./components/ProviderAccessPanel";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
@@ -44,12 +45,13 @@ import {
 } from "./lib/autoWarmupPolicy";
 import "./App.css";
 
-type AppView = "codex" | "claude";
+type AppView = "codex" | "claude" | "providers";
 const VIEW_STORAGE_KEY = "codex-switcher.view";
 
 function readStoredView(): AppView {
   try {
-    return localStorage.getItem(VIEW_STORAGE_KEY) === "claude" ? "claude" : "codex";
+    const value = localStorage.getItem(VIEW_STORAGE_KEY);
+    return value === "claude" || value === "providers" ? value : "codex";
   } catch {
     return "codex";
   }
@@ -1437,7 +1439,7 @@ function App() {
                     aria-label="Choose view"
                     className="inline-flex rounded-lg border border-gray-200 p-0.5 text-xs dark:border-gray-700"
                   >
-                    {(["codex", "claude"] as const).map((v) => (
+                    {(["codex", "claude", "providers"] as const).map((v) => (
                       <button
                         key={v}
                         role="tab"
@@ -1448,7 +1450,7 @@ function App() {
                             : "text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
                           }`}
                       >
-                        {v === "codex" ? "Codex" : "Claude"}
+                        {v === "codex" ? "Codex" : v === "claude" ? "Claude" : "Providers"}
                       </button>
                     ))}
                   </div>
@@ -1770,7 +1772,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
-        {view === "claude" ? (
+        {view === "providers" ? (
+          <ProviderAccessPanel />
+        ) : view === "claude" ? (
           <ClaudeUsagePanel masked={allMasked} />
         ) : loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
