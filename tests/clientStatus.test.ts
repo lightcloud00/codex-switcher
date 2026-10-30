@@ -13,7 +13,7 @@ function tool(over: Partial<ClientToolRow>): ClientToolRow {
 
 function grok(over: Partial<GrokBotRow>): GrokBotRow {
   return {
-    id: "grok-mac", computer: "Mac", bot: "Grok Bot", plan: "SuperGrok Ultra", renews: "Ends 2026-11-23 (renewal off)",
+    id: "grok-mac", computer: "Mac", bot: "Grok Bot", plan: "Grok Ultra", renews: "Ends 2026-11-23 (renewal off)",
     signed_in: true, app_version: "0.78.1", cli_signed_in: true, used_percent: null, used_observed_at: null, ...over,
   };
 }
@@ -67,7 +67,7 @@ test("Grok shows the hand reading with its age and flags it stale after a day", 
   assert.equal(fresh.tone, "ok");
   assert.equal(stale.left, "99% (read 2d ago, stale)");
   assert.equal(stale.tone, "warn");
-  assert.equal(stale.type, "Grok SuperGrok Ultra");
+  assert.equal(stale.type, "Grok Ultra");
   assert.equal(stale.renews, "Ends 2026-11-23 (renewal off)");
 });
 
@@ -81,7 +81,8 @@ test("Grok without a reading never invents a percent; unreachable and signed-out
     NOW,
   );
   assert.equal(none.left, "not recorded");
-  assert.equal(none.type, "Grok (plan not recorded)");
+  assert.equal(none.type, "Grok");
+  assert.match(none.detail ?? "", /plan not recorded/);
   assert.equal(none.renews, "—");
   assert.match(none.detail ?? "", /Grok CLI signed out/);
   assert.equal(down.status, "unreachable");

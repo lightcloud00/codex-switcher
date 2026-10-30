@@ -36,8 +36,11 @@ export interface ApiCreditsSnapshot {
   observed_at: string;
   providers: ApiCreditRow[];
 }
+/** Numbers get two decimals and a leading minus ("-$0.20"); provider strings are shown as sent. */
 function money(currency: string, amount: string | number): string {
-  return currency === "USD" ? `$${amount}` : `${currency} ${amount}`;
+  const negative = typeof amount === "number" && amount < 0;
+  const text = typeof amount === "number" ? Math.abs(amount).toFixed(2) : amount;
+  return `${negative ? "-" : ""}${currency === "USD" ? `$${text}` : `${currency} ${text}`}`;
 }
 /** Shows the balance the provider reported, its own note when it has no balance API, and nothing for a failed row. */
 export function balanceLine(row: ApiCreditRow): string {
@@ -58,6 +61,7 @@ export function statusLabel(row: ApiCreditRow): string {
     if (row.error === "timeout") return "timed out";
     if (row.error === "http_401" || row.error === "http_403") return "key rejected";
     const http = /^http_(\d+)$/.exec(row.error);
+    if (http && http[1].startsWith("5")) return `provider down (${http[1]})`;
     return http ? `provider error ${http[1]}` : "check failed";
   }
   return row.available ? "ready" : "unavailable";
