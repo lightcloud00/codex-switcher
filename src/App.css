@@ -9,3 +9,27 @@
 :root.dark {
   color-scheme: dark;
 }
+
+/* WebKit draws today's date in an empty date field; hide it so an unset date does not read as set.
+   The month, day and year fields carry their own color, so each is cleared (one rule per pseudo-element,
+   so an engine that lacks one still applies the rest). */
+input[type="date"][data-empty]:not(:focus)::-webkit-datetime-edit {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+input[type="date"][data-empty]:not(:focus)::-webkit-datetime-edit-month-field {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+input[type="date"][data-empty]:not(:focus)::-webkit-datetime-edit-day-field {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+input[type="date"][data-empty]:not(:focus)::-webkit-datetime-edit-year-field {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+input[type="date"][data-empty]:not(:focus)::-webkit-datetime-edit-text {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}

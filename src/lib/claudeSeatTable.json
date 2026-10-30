@@ -1,6 +1,9 @@
 {
-  "comment": "Known Claude seats, shared by the UI (src/lib/claudeUsage.ts) and the capacity exporter (src-tauri/src/commands/claude_usage.rs). The fleet seat registry stays the source of truth for which seats exist and for the account name claude-usage reports each seat under (its usage_account, the primary join label). usage_labels here are only a fallback for a seat the registry does not list or has no usage_account for; launcher is the command that starts Claude on that seat. Retired aliases (claude-gustavo) and the default ~/.claude login (mac-max) are deliberately not listed: neither is a seat.",
+  "comment": "Known Claude seats, shared by the UI (src/lib/claudeUsage.ts) and the capacity exporter (src-tauri/src/commands/claude_usage.rs). The fleet seat registry stays the source of truth for which seats exist and for the account name claude-usage reports each seat under (its usage_account, the primary join label). usage_labels here are only a fallback for a seat the registry does not list or has no usage_account for; launcher is the command that starts Claude on that seat. Retired aliases (claude-gustavo) and the default ~/.claude login (mac-max) are deliberately not listed: neither is a registry seat, although the Mac worker pool runs on mac-max. login_names gives a usage label that is not a seat a plain name for its card.",
   "near_limit_pct": 95,
+  "login_names": {
+    "mac-max": "default ~/.claude login (Mac pool host)"
+  },
   "seats": [
     {
       "id": "claude-mac-gustavo",
