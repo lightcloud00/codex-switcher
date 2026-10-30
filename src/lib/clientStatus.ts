@@ -21,6 +21,8 @@ export interface GrokBotRow {
   computer: string;
   bot: string;
   plan: string | null;
+  /** The Grok account email, when it has been read off the app. */
+  account?: string | null;
   renews?: string | null;
   signed_in: boolean | null;
   app_version: string | null;
@@ -88,6 +90,7 @@ export function buildGrokRows(rows: GrokBotRow[], nowMs: number): OverviewRow[] 
       ? `${leftText(g.used_percent)} (read ${ageText(g.used_observed_at as string, nowMs)}${stale ? ", stale" : ""})`
       : "not recorded";
     const detail = [
+      g.account && g.bot,
       g.computer,
       g.app_version && `app v${g.app_version}`,
       g.cli_signed_in === false ? "Grok CLI signed out" : g.cli_signed_in ? "Grok CLI signed in" : null,
@@ -96,7 +99,7 @@ export function buildGrokRows(rows: GrokBotRow[], nowMs: number): OverviewRow[] 
     const status = g.error === "unreachable" ? "unreachable" : g.error ? "not checked" : g.signed_in ? "signed in" : "signed out";
     return {
       id: `grok:${g.id}`,
-      account: g.bot,
+      account: g.account?.trim() || g.bot,
       detail: detail.join(" · "),
       type: g.plan || "Grok",
       left,
