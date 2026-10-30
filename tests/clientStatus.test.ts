@@ -53,6 +53,8 @@ test("signed-out tools are bad; a missing IDE extension is muted and sorts as in
   assert.equal(missing.status, "not installed");
   assert.equal(missing.inactive, true);
   assert.equal(shared.status, "installed");
+  // IDE versions already name the editor, so they get no "v" prefix.
+  assert.match(shared.detail ?? "", /^VS Code 2\.1\.285/);
 });
 
 test("Grok shows the hand reading with its age and flags it stale after a day", () => {

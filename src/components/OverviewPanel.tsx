@@ -131,7 +131,8 @@ function OverviewTableRow({ row, blur }: { row: OverviewRow; blur: boolean }) {
         )}
       </td>
       <td className="px-3 py-2">
-        <span className={`${BADGE_BASE} ${TONE_BADGE.muted}`}>{row.type}</span>
+        {/* The type badge may wrap: tool and plan names are longer than the status words. */}
+        <span className={`${BADGE_BASE} ${TONE_BADGE.muted} max-w-full whitespace-normal break-words`}>{row.type}</span>
       </td>
       <td className={`px-3 py-2 font-medium tabular-nums ${text}`}>{row.left}</td>
       <td className={`px-3 py-2 ${sub}`}>{row.resets}</td>
