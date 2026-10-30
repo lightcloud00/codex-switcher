@@ -10,6 +10,112 @@ use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AppSettings, AuthData, AuthDotJson, StoredAccount,
 };
 
+/// The ChatGPT account and, when the ID token carries one, the login email
+/// that a set of tokens belongs to.
+struct ChatGptIdentity {
+    account_id: String,
+    email: Option<String>,
+}
+
+impl ChatGptIdentity {
+    fn from_tokens(
+        id_token: &str,
+        account_id: Option<&String>,
+        email: Option<&String>,
+    ) -> Option<Self> {
+        let claims = parse_chatgpt_id_token_claims(id_token);
+        Some(Self {
+            account_id: claims.account_id.or_else(|| account_id.cloned())?,
+            email: claims
+                .email
+                .or_else(|| email.cloned())
+                .map(|email| email.to_lowercase()),
+        })
+    }
+
+    fn of_live_auth(auth: &AuthDotJson) -> Option<Self> {
+        let tokens = auth.tokens.as_ref()?;
+        Self::from_tokens(&tokens.id_token, tokens.account_id.as_ref(), None)
+    }
+
+    fn of_account(account: &StoredAccount) -> Option<Self> {
+        let AuthData::ChatGPT {
+            id_token,
+            account_id,
+            ..
+        } = &account.auth_data
+        else {
+            return None;
+        };
+        Self::from_tokens(id_token, account_id.as_ref(), account.email.as_ref())
+    }
+
+    /// Members of one team workspace share an account id, so compare the
+    /// login email too whenever both sides carry one.
+    fn matches(&self, other: &Self) -> bool {
+        self.account_id == other.account_id
+            && match (&self.email, &other.email) {
+                (Some(ours), Some(theirs)) => ours == theirs,
+                _ => true,
+            }
+    }
+}
+
+/// Whether Codex's live auth.json may hold this account's tokens. A login with
+/// no readable identity counts as a match, so callers stay cautious with it.
+pub fn live_auth_may_hold_account(account: &StoredAccount, auth: &AuthDotJson) -> bool {
+    if auth.tokens.is_none() {
+        return false;
+    }
+    match (
+        ChatGptIdentity::of_account(account),
+        ChatGptIdentity::of_live_auth(auth),
+    ) {
+        (Some(stored), Some(live)) => stored.matches(&live),
+        _ => true,
+    }
+}
+
+/// Make the stored account that Codex is signed in to the active one, then
+/// copy its live tokens.
+///
+/// Codex can sign in or out without the switcher. That left
+/// `active_account_id` on a session Codex no longer held, so the active card
+/// showed 401 forever: refreshing the active account is skipped while Codex
+/// runs. Only an unambiguous match is adopted.
+pub fn reconcile_active_account_with_live_auth(
+    store: &mut AccountsStore,
+    auth: &AuthDotJson,
+) -> bool {
+    let Some(live) = ChatGptIdentity::of_live_auth(auth) else {
+        return false;
+    };
+    let active_holds_live = store
+        .active_account_id
+        .as_deref()
+        .and_then(|active_id| {
+            store
+                .accounts
+                .iter()
+                .find(|account| account.id == active_id)
+        })
+        .and_then(ChatGptIdentity::of_account)
+        .is_some_and(|stored| stored.matches(&live));
+    if active_holds_live {
+        return sync_active_account_tokens(store, auth);
+    }
+
+    let mut holders = store.accounts.iter().filter(|account| {
+        ChatGptIdentity::of_account(account).is_some_and(|stored| stored.matches(&live))
+    });
+    let (Some(holder), None) = (holders.next(), holders.next()) else {
+        return false;
+    };
+    store.active_account_id = Some(holder.id.clone());
+    sync_active_account_tokens(store, auth);
+    true
+}
+
 pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson) -> bool {
     let Some(active_id) = store.active_account_id.as_deref() else {
         return false;
@@ -24,6 +130,16 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     else {
         return false;
     };
+    let (Some(stored), Some(current)) = (
+        ChatGptIdentity::of_account(account),
+        ChatGptIdentity::of_live_auth(auth),
+    ) else {
+        return false;
+    };
+    if !stored.matches(&current) {
+        return false;
+    }
+    let current_account_id = current.account_id;
     let AuthData::ChatGPT {
         id_token,
         access_token,
@@ -33,21 +149,6 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     else {
         return false;
     };
-
-    let stored_account_id = parse_chatgpt_id_token_claims(id_token)
-        .account_id
-        .or_else(|| account_id.clone());
-    let current_account_id = parse_chatgpt_id_token_claims(&tokens.id_token)
-        .account_id
-        .or_else(|| tokens.account_id.clone());
-    let (Some(stored_account_id), Some(current_account_id)) =
-        (stored_account_id, current_account_id)
-    else {
-        return false;
-    };
-    if stored_account_id != current_account_id {
-        return false;
-    }
 
     let changed = *id_token != tokens.id_token
         || *access_token != tokens.access_token
@@ -391,7 +492,10 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_account_to_store, sync_active_account_tokens};
+    use super::{
+        add_account_to_store, live_auth_may_hold_account, reconcile_active_account_with_live_auth,
+        sync_active_account_tokens,
+    };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
 
@@ -433,6 +537,34 @@ mod tests {
             format!(r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#);
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         format!("header.{encoded}.{suffix}")
+    }
+
+    fn id_token_with_member(account_id: &str, email: &str, suffix: &str) -> String {
+        let payload = format!(
+            r#"{{"email":"{email}","https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
+        );
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        format!("header.{encoded}.{suffix}")
+    }
+
+    fn team_member(email: &str, suffix: &str) -> StoredAccount {
+        let mut member = account(email, "workspace-team", suffix);
+        if let AuthData::ChatGPT { id_token, .. } = &mut member.auth_data {
+            *id_token = id_token_with_member("workspace-team", email, suffix);
+        }
+        member
+    }
+
+    fn team_auth(email: &str, suffix: &str) -> AuthDotJson {
+        let mut live = auth("workspace-team", suffix);
+        live.tokens.as_mut().unwrap().id_token =
+            id_token_with_member("workspace-team", &email.to_uppercase(), suffix);
+        live
+    }
+
+    fn active_refresh_token(store: &AccountsStore) -> &str {
+        let active_id = store.active_account_id.as_deref().unwrap();
+        refresh_token(store.accounts.iter().find(|a| a.id == active_id).unwrap())
     }
 
     #[test]
@@ -572,5 +704,136 @@ mod tests {
         };
         assert_eq!(account_id.as_deref(), Some("workspace-a"));
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-a2");
+    }
+
+    #[test]
+    fn adopts_the_stored_account_codex_signed_in_to_outside_the_switcher() {
+        let account_a = account("A", "workspace-a", "a1");
+        let account_b = account("B", "workspace-b", "b1");
+        let account_b_id = account_b.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account_a.clone(), account_b],
+            active_account_id: Some(account_a.id.clone()),
+            ..AccountsStore::default()
+        };
+
+        assert!(reconcile_active_account_with_live_auth(
+            &mut store,
+            &auth("workspace-b", "b2")
+        ));
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(account_b_id.as_str())
+        );
+        assert_eq!(active_refresh_token(&store), "refresh-b2");
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-a1");
+
+        // Already reconciled: nothing further to change.
+        assert!(!reconcile_active_account_with_live_auth(
+            &mut store,
+            &auth("workspace-b", "b2")
+        ));
+    }
+
+    #[test]
+    fn adopts_from_no_active_account() {
+        let account_a = account("A", "workspace-a", "a1");
+        let account_a_id = account_a.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account_a],
+            ..AccountsStore::default()
+        };
+
+        assert!(reconcile_active_account_with_live_auth(
+            &mut store,
+            &auth("workspace-a", "a2")
+        ));
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(account_a_id.as_str())
+        );
+        assert_eq!(active_refresh_token(&store), "refresh-a2");
+    }
+
+    #[test]
+    fn leaves_active_account_for_unknown_ambiguous_or_api_key_logins() {
+        let account_a = account("A", "workspace-a", "a1");
+        let account_a_id = account_a.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![
+                account_a,
+                account("Shared 1", "workspace-shared", "s1"),
+                account("Shared 2", "workspace-shared", "s2"),
+            ],
+            active_account_id: Some(account_a_id.clone()),
+            ..AccountsStore::default()
+        };
+        let api_key_login = AuthDotJson {
+            openai_api_key: Some("sk-test".into()),
+            tokens: None,
+            last_refresh: None,
+        };
+
+        for live in [
+            auth("workspace-unknown", "u1"),
+            auth("workspace-shared", "s3"),
+            api_key_login,
+        ] {
+            assert!(!reconcile_active_account_with_live_auth(&mut store, &live));
+            assert_eq!(
+                store.active_account_id.as_deref(),
+                Some(account_a_id.as_str())
+            );
+            assert_eq!(active_refresh_token(&store), "refresh-a1");
+        }
+    }
+
+    #[test]
+    fn team_members_sharing_a_workspace_are_told_apart_by_email() {
+        let first = team_member("first@example.com", "f1");
+        let second = team_member("second@example.com", "s1");
+        let second_id = second.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![first.clone(), second],
+            active_account_id: Some(first.id.clone()),
+            ..AccountsStore::default()
+        };
+
+        assert!(!sync_active_account_tokens(
+            &mut store,
+            &team_auth("second@example.com", "s2")
+        ));
+        assert_eq!(active_refresh_token(&store), "refresh-f1");
+
+        assert!(reconcile_active_account_with_live_auth(
+            &mut store,
+            &team_auth("second@example.com", "s2")
+        ));
+        assert_eq!(store.active_account_id.as_deref(), Some(second_id.as_str()));
+        assert_eq!(active_refresh_token(&store), "refresh-s2");
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-f1");
+    }
+
+    #[test]
+    fn live_auth_ownership_is_cautious_only_when_identity_is_unknown() {
+        let account_a = account("A", "workspace-a", "a1");
+        let mut unknown = auth("workspace-a", "unknown");
+        unknown.tokens.as_mut().unwrap().account_id = None;
+        let api_key_login = AuthDotJson {
+            openai_api_key: Some("sk-test".into()),
+            tokens: None,
+            last_refresh: None,
+        };
+
+        assert!(live_auth_may_hold_account(
+            &account_a,
+            &auth("workspace-a", "a2")
+        ));
+        assert!(live_auth_may_hold_account(&account_a, &unknown));
+        assert!(!live_auth_may_hold_account(
+            &account_a,
+            &auth("workspace-b", "b1")
+        ));
+        assert!(!live_auth_may_hold_account(&account_a, &api_key_login));
     }
 }

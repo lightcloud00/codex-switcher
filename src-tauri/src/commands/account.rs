@@ -2,9 +2,9 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
-    get_active_account, import_from_auth_json, import_from_auth_json_contents, load_accounts,
-    read_current_auth, remove_account, save_accounts, set_active_account, switch_to_account,
-    sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts, read_current_auth,
+    reconcile_active_account_with_live_auth, remove_account, save_accounts, set_active_account,
+    switch_to_account, sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -69,10 +69,26 @@ struct SlimAccountPayload {
     refresh_token: Option<String>,
 }
 
+/// Load accounts after pointing the active account at the one Codex is
+/// signed in to. Skips the repair while a switch or refresh holds the lock.
+fn load_accounts_matching_live_auth() -> Result<AccountsStore, String> {
+    let Ok(_auth_guard) = AUTH_OPERATION_LOCK.try_lock() else {
+        return load_accounts().map_err(|e| e.to_string());
+    };
+    let mut store = load_accounts().map_err(|e| e.to_string())?;
+    // An unreadable auth.json must not hide the account list.
+    if let Ok(Some(auth)) = read_current_auth() {
+        if reconcile_active_account_with_live_auth(&mut store, &auth) {
+            save_accounts(&store).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(store)
+}
+
 /// List all accounts with their info
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_accounts_matching_live_auth()?;
     let active_id = store.active_account_id.as_deref();
 
     let accounts: Vec<AccountInfo> = store
@@ -91,11 +107,15 @@ pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
 /// Get the currently active account
 #[tauri::command]
 pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_accounts_matching_live_auth()?;
     let active_id = store.active_account_id.as_deref();
 
-    if let Some(active) = get_active_account().map_err(|e| e.to_string())? {
-        let mut info = AccountInfo::from_stored(&active, active_id);
+    if let Some(active) = store
+        .accounts
+        .iter()
+        .find(|account| Some(account.id.as_str()) == active_id)
+    {
+        let mut info = AccountInfo::from_stored(active, active_id);
         super::usage::apply_cached_account_metadata(&mut info);
         Ok(Some(info))
     } else {
