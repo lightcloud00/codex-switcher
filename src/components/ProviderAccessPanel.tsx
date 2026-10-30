@@ -61,7 +61,7 @@ export function ProviderAccessPanel() {
           const savedValue = saved.find(x => x.id === p.id)?.[key] ?? null;
           const unsaved = dateChanged(p[key], savedValue);
           return <div key={key} className="min-w-0 text-xs text-gray-500">
-            <label className="block">{label}<input type="date" aria-label={`${PLAN_LABELS[p.id]} ${label}`} value={p[key] ?? ""} onChange={e => edit(p.id, key, e.target.value)} className="mt-1 block w-full min-w-0 rounded-md border bg-transparent p-2 text-sm text-gray-900 dark:text-gray-100"/></label>
+            <label className="block">{label}<input type="date" aria-label={`${PLAN_LABELS[p.id]} ${label}`} value={p[key] ?? ""} data-empty={p[key] ? undefined : ""} onChange={e => edit(p.id, key, e.target.value)} className="mt-1 block w-full min-w-0 rounded-md border bg-transparent p-2 text-sm text-gray-900 dark:text-gray-100"/></label>
             <div className="mt-1 flex items-center justify-between gap-2"><span className={unsaved ? "text-amber-700 dark:text-amber-300" : ""}>{pendingDateLabel(p[key], savedValue)}</span>
               {p[key] && <button type="button" aria-label={`Clear ${PLAN_LABELS[p.id]} ${label}`} onClick={() => edit(p.id, key, "")} className="rounded border px-1.5 py-0.5">Clear</button>}</div>
           </div>;
