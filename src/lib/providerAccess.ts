@@ -7,6 +7,8 @@ export interface PlanDates {
 export const PLAN_LABELS: Record<string, string> = {
   "x-subscription": "X Subscription · Grok + Cursor (shared allowance)",
   "anthropic-api": "Anthropic API credits",
+  "deepseek-api": "DeepSeek API credits",
+  "fireworks-api": "Fireworks AI credits",
   "claude-mac-gustavo": "Claude · Gustavo", "claude-mac-main": "Claude · Main",
   "claude-mac-096": "Claude · 096", "claude-windows": "Claude · Windows", "claude-wsl": "Claude · WSL",
 };

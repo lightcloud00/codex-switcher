@@ -19,6 +19,8 @@ const PLAN_IDS: &[&str] = &[
     "claude-mac-096",
     "claude-windows",
     "claude-wsl",
+    "deepseek-api",
+    "fireworks-api",
 ];
 fn dates_path() -> Result<PathBuf, String> {
     Ok(dirs::config_dir()
@@ -54,13 +56,27 @@ fn validate(plans: &[PlanDates]) -> Result<(), String> {
     }
     Ok(())
 }
+/// A file saved before a plan id existed lacks its row; append blank rows so the panel can offer it.
+fn with_missing_plans(mut rows: Vec<PlanDates>) -> Vec<PlanDates> {
+    for id in PLAN_IDS {
+        if !rows.iter().any(|r| r.id == *id) {
+            rows.push(PlanDates {
+                id: id.to_string(),
+                billing_renews_on: None,
+                credit_expires_on: None,
+                credential_expires_on: None,
+            });
+        }
+    }
+    rows
+}
 fn read_dates() -> Result<Vec<PlanDates>, String> {
     match std::fs::read_to_string(dates_path()?) {
         Ok(raw) => {
             let rows: Vec<PlanDates> =
                 serde_json::from_str(&raw).map_err(|_| "Invalid provider date file")?;
             validate(&rows)?;
-            Ok(rows)
+            Ok(with_missing_plans(rows))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PLAN_IDS
             .iter()
@@ -74,7 +90,7 @@ fn read_dates() -> Result<Vec<PlanDates>, String> {
         Err(_) => Err("Could not read provider dates".into()),
     }
 }
-fn find_binary(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_binary(name: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let mut paths = vec![
         home.join(".local/bin"),
@@ -456,6 +472,17 @@ mod tests {
             serde_json::from_str::<PlanDates>(r#"{"id":"x-subscription","apiKey":"secret"}"#)
                 .is_err()
         );
+    }
+    #[test]
+    fn a_dates_file_from_before_a_plan_existed_gains_a_blank_row() {
+        let rows = with_missing_plans(vec![plan("x-subscription", "2026-11-13")]);
+        let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(rows.len(), PLAN_IDS.len());
+        assert_eq!(ids[0], "x-subscription");
+        assert!(ids.contains(&"deepseek-api") && ids.contains(&"fireworks-api"));
+        assert_eq!(rows[0].billing_renews_on.as_deref(), Some("2026-11-13"));
+        assert!(rows[1..].iter().all(|r| r.billing_renews_on.is_none()));
+        assert!(validate(&rows).is_ok());
     }
     #[tokio::test]
     async fn launcher_rejects_renderer_command() {

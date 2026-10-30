@@ -195,9 +195,17 @@ export function seatTitle(seat: Pick<ClaudeSeat, "id" | "email">): string {
   return seat.email?.trim() || seat.id;
 }
 
-/** "claude-mac-096 · Mac" under an email title; just the host under a seat-id title. */
+/** Plain names for usage labels that are logins, not seats (the default ~/.claude login). */
+const LOGIN_NAMES: Readonly<Record<string, string>> = seatTable.login_names;
+
+/**
+ * "claude-mac-096 · Mac" under an email title; just the host under a seat-id title. A login that is
+ * not a seat shows its plain name in place of the label, so it does not read as a second seat.
+ */
 export function seatSubtitle(seat: Pick<ClaudeSeat, "id" | "email" | "host">): string {
   const host = hostLabel(seat.host);
+  const name = LOGIN_NAMES[seat.id];
+  if (name) return [name, host].filter(Boolean).join(" · ");
   return (seat.email?.trim() ? [seat.id, host] : [host]).filter(Boolean).join(" · ");
 }
 
