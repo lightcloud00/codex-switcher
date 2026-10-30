@@ -1,4 +1,5 @@
 import { ProviderAccessPanel } from "./components/ProviderAccessPanel";
+import { ApiCreditsPanel } from "./components/ApiCreditsPanel";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
@@ -1774,7 +1775,10 @@ function App() {
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
         {view === "providers" ? (
-          <ProviderAccessPanel />
+          <div className="space-y-8">
+            <ProviderAccessPanel />
+            <ApiCreditsPanel />
+          </div>
         ) : view === "claude" ? (
           <ClaudeUsagePanel masked={allMasked} />
         ) : loading && accounts.length === 0 ? (
