@@ -6,7 +6,8 @@ use chrono::Utc;
 use tokio::time::{sleep, Duration};
 
 use super::{
-    load_accounts, read_current_auth, save_accounts, switch_to_account, sync_active_account_tokens,
+    live_auth_may_hold_account, load_accounts, read_current_auth,
+    reconcile_active_account_with_live_auth, save_accounts, switch_to_account,
     update_account_chatgpt_tokens, AUTH_OPERATION_LOCK,
 };
 use crate::types::{
@@ -134,8 +135,8 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     }
 
     // Re-read active state after the network request before touching auth.json.
-    let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
-    if is_active {
+    let store = load_accounts()?;
+    if codex_uses_account(&store, &updated, read_current_auth()?.as_ref()) {
         if let Err(err) = switch_to_account(&updated) {
             println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
         }
@@ -144,35 +145,35 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     Ok(updated)
 }
 
-fn reconcile_active_account_from_auth(
-    store: &mut AccountsStore,
-    account_id: &str,
-    auth: &AuthDotJson,
+/// Codex owns an account's tokens only while it is the active account and
+/// auth.json, if present, still holds it. Otherwise a refresh cannot race
+/// Codex, and auth.json belongs to a login made outside the switcher.
+fn codex_uses_account(
+    store: &AccountsStore,
+    account: &StoredAccount,
+    live_auth: Option<&AuthDotJson>,
 ) -> bool {
-    if store.active_account_id.as_deref() != Some(account_id) {
-        return false;
-    }
-
-    sync_active_account_tokens(store, auth)
+    store.active_account_id.as_deref() == Some(account.id.as_str())
+        && live_auth.is_none_or(|auth| live_auth_may_hold_account(account, auth))
 }
 
 fn load_account_reconciling_live_auth(account_id: &str) -> Result<(StoredAccount, bool)> {
     let mut store = load_accounts()?;
-    let is_active = store.active_account_id.as_deref() == Some(account_id);
+    let live_auth = read_current_auth()?;
 
-    if is_active {
-        if let Some(auth) = read_current_auth()? {
-            if reconcile_active_account_from_auth(&mut store, account_id, &auth) {
-                save_accounts(&store)?;
-            }
+    if let Some(auth) = &live_auth {
+        if reconcile_active_account_with_live_auth(&mut store, auth) {
+            save_accounts(&store)?;
         }
     }
 
     let account = store
         .accounts
-        .into_iter()
+        .iter()
         .find(|stored| stored.id == account_id)
+        .cloned()
         .context("Account not found")?;
+    let is_active = codex_uses_account(&store, &account, live_auth.as_ref());
     Ok((account, is_active))
 }
 
@@ -342,8 +343,13 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 #[cfg(test)]
 mod tests {
     use super::{
-        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, merge_refresh_response,
-        reconcile_active_account_from_auth, resolve_refreshed_id_token, RefreshTokenResponse,
+        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, codex_uses_account,
+        load_account_reconciling_live_auth, merge_refresh_response, resolve_refreshed_id_token,
+        RefreshTokenResponse,
+    };
+    use crate::auth::test_support::TestHome;
+    use crate::auth::{
+        load_accounts, reconcile_active_account_with_live_auth, save_accounts, switch_to_account,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -452,9 +458,7 @@ mod tests {
         };
 
         assert!(chatgpt_tokens_need_refresh(&account));
-        assert!(reconcile_active_account_from_auth(
-            &mut store, &local_id, &auth
-        ));
+        assert!(reconcile_active_account_with_live_auth(&mut store, &auth));
 
         account = store.accounts.remove(0);
         assert!(!chatgpt_tokens_need_refresh(&account));
@@ -464,43 +468,91 @@ mod tests {
         assert_eq!(refresh_token, "live-refresh");
     }
 
-    #[test]
-    fn inactive_account_does_not_use_live_auth() {
-        let now = chrono::Utc::now().timestamp();
-        let account = StoredAccount::new_chatgpt(
-            "Inactive".into(),
+    fn chatgpt_account(name: &str, workspace: &str, now: i64) -> StoredAccount {
+        StoredAccount::new_chatgpt(
+            name.into(),
             None,
             None,
             None,
-            account_jwt("workspace-a", now - 3_600, "stored"),
-            jwt_with_exp(now - 3_600),
-            "stored-refresh".into(),
-            Some("workspace-a".into()),
-        );
-        let local_id = account.id.clone();
-        let mut store = AccountsStore {
-            accounts: vec![account],
-            active_account_id: Some("different-local-account".into()),
-            ..AccountsStore::default()
-        };
-        let auth = AuthDotJson {
+            account_jwt(workspace, now + 3_600, name),
+            jwt_with_exp(now + 3_600),
+            format!("{name}-refresh"),
+            Some(workspace.into()),
+        )
+    }
+
+    fn live_auth(workspace: &str, now: i64) -> AuthDotJson {
+        AuthDotJson {
             openai_api_key: None,
             tokens: Some(TokenData {
-                id_token: account_jwt("workspace-a", now + 3_600, "live"),
+                id_token: account_jwt(workspace, now + 3_600, "live"),
                 access_token: jwt_with_exp(now + 3_600),
                 refresh_token: "live-refresh".into(),
-                account_id: Some("workspace-a".into()),
+                account_id: Some(workspace.into()),
             }),
             last_refresh: None,
+        }
+    }
+
+    #[test]
+    fn codex_owns_active_account_only_while_auth_json_holds_it() {
+        let now = chrono::Utc::now().timestamp();
+        let active = chatgpt_account("Active", "workspace-a", now);
+        let store = AccountsStore {
+            accounts: vec![active.clone()],
+            active_account_id: Some(active.id.clone()),
+            ..AccountsStore::default()
         };
 
-        assert!(!reconcile_active_account_from_auth(
-            &mut store, &local_id, &auth
+        assert!(codex_uses_account(&store, &active, None));
+        assert!(codex_uses_account(
+            &store,
+            &active,
+            Some(&live_auth("workspace-a", now))
         ));
-        let AuthData::ChatGPT { refresh_token, .. } = &store.accounts[0].auth_data else {
+        // Signed in elsewhere: refreshing cannot race Codex, and auth.json
+        // must not be overwritten with this account.
+        assert!(!codex_uses_account(
+            &store,
+            &active,
+            Some(&live_auth("workspace-elsewhere", now))
+        ));
+    }
+
+    #[test]
+    fn refresh_adopts_the_account_codex_signed_in_to_outside_the_switcher() {
+        let _home = TestHome::new();
+        let now = chrono::Utc::now().timestamp();
+        let revoked = chatgpt_account("Revoked", "workspace-a", now);
+        let signed_in = chatgpt_account("SignedIn", "workspace-b", now);
+        save_accounts(&AccountsStore {
+            accounts: vec![revoked.clone(), signed_in.clone()],
+            active_account_id: Some(revoked.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+        let mut live = signed_in.clone();
+        if let AuthData::ChatGPT { refresh_token, .. } = &mut live.auth_data {
+            *refresh_token = "live-refresh".into();
+        }
+        switch_to_account(&live).unwrap();
+
+        // The stale active account is no longer Codex's, so it may refresh.
+        let (_, revoked_is_codex_owned) = load_account_reconciling_live_auth(&revoked.id).unwrap();
+        assert!(!revoked_is_codex_owned);
+
+        let store = load_accounts().unwrap();
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(signed_in.id.as_str())
+        );
+        let AuthData::ChatGPT { refresh_token, .. } = &store.accounts[1].auth_data else {
             panic!("expected ChatGPT account");
         };
-        assert_eq!(refresh_token, "stored-refresh");
+        assert_eq!(refresh_token, "live-refresh");
+        let (_, signed_in_is_codex_owned) =
+            load_account_reconciling_live_auth(&signed_in.id).unwrap();
+        assert!(signed_in_is_codex_owned);
     }
 
     #[test]
