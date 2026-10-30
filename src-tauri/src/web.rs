@@ -148,6 +148,8 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let args: UploadAuthJsonArgs = parse_args(payload)?;
             to_json(add_account_from_auth_json_text(args.name, args.contents).await?)
         }
+        // Installed state and dates only. The sign-in probes (`check_provider_sign_in`) are desktop-only,
+        // so no local CLI runs for LAN callers.
         "get_provider_access" => get_provider_access().await,
         "save_provider_dates" => {
             #[derive(Deserialize)]
@@ -352,5 +354,18 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lan_route_does_not_expose_the_sign_in_probe() {
+        let err = invoke_web_command("check_provider_sign_in", json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("Unsupported web command"), "{err}");
     }
 }
