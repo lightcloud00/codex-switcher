@@ -12,6 +12,7 @@ import {
   KNOWN_SEATS,
   lastKnownLine,
   lastReadLabel,
+  limitBarNotes,
   NEAR_LIMIT_PCT,
   noReadingLine,
   overlayPrometheus,
@@ -113,6 +114,50 @@ test("lastReadLabel says when a window was last read and what it showed", () => 
   assert.equal(lastReadLabel(win({ observed_at: "", age_s: Number.NaN }), now), "");
   assert.equal(lastReadLabel(null, now), "");
   assert.equal(lastReadLabel(win({ observed_at: "2026-10-30T12:21:40Z" }), now), "last read just now");
+});
+
+test("limitBarNotes keeps the reset countdown for a stale window that still has a percentage", () => {
+  const now = Date.parse("2026-10-30T12:51:00Z");
+  // The live case: an exhausted pool seat, read 2.4 days ago, resetting on 2026-11-02.
+  const stale = win({
+    state: "stale",
+    source: "pool",
+    used_pct: 100,
+    resets_at: "2026-11-02T14:00:00Z",
+    observed_at: "2026-10-28T03:15:00Z",
+    age_s: 2.4 * 86400,
+  });
+  assert.deepEqual(limitBarNotes(stale, now), { countdown: "in 3d 1h", lastRead: "last read 2d ago" });
+  // A current reading counts down and needs no last-read note.
+  const current = win({ used_pct: 41, resets_at: "2026-10-30T14:09:00Z", observed_at: "2026-10-30T12:50:00Z" });
+  assert.deepEqual(limitBarNotes(current, now), { countdown: "in 1h 18m", lastRead: "" });
+});
+
+test("limitBarNotes never claims a window without a percentage resets, or that an old reset is now", () => {
+  const now = Date.parse("2026-10-30T12:22:00Z");
+  // reset since read: no percentage, so no countdown, but it says when it was last read.
+  const reset = win({
+    state: "reset",
+    used_pct: null,
+    last_used_pct: 40,
+    resets_at: "2026-10-13T03:10:00Z",
+    observed_at: "2026-10-13T03:00:00Z",
+  });
+  assert.deepEqual(limitBarNotes(reset, now), { countdown: "", lastRead: "last read 17d ago, was 40%" });
+  // A stale percentage whose reset time is long past says nothing about "now".
+  const pastStale = win({
+    state: "stale",
+    used_pct: 100,
+    resets_at: "2026-10-29T00:00:00Z",
+    observed_at: "2026-10-28T03:00:00Z",
+  });
+  assert.deepEqual(limitBarNotes(pastStale, now), { countdown: "", lastRead: "last read 2d ago" });
+  // Within 2 minutes of the reset "now" is still honest.
+  const justReset = win({ resets_at: "2026-10-30T12:21:00Z", observed_at: "2026-10-30T12:20:00Z" });
+  assert.equal(limitBarNotes(justReset, now).countdown, "now");
+  // No window at all: nothing to print.
+  assert.deepEqual(limitBarNotes(null, now), { countdown: "", lastRead: "" });
+  assert.deepEqual(limitBarNotes(undefined, now), { countdown: "", lastRead: "" });
 });
 
 test("formatTokens and updatedAgo", () => {

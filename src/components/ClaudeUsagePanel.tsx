@@ -8,10 +8,9 @@ import {
   hasLiveWindow,
   hostLabel,
   lastKnownLine,
-  lastReadLabel,
+  limitBarNotes,
   noReadingLine,
   planLabel,
-  resetCountdown,
   SEAT_HEALTH_PROBLEM_STATES,
   seatStatusLabel,
   seatSubtitle,
@@ -42,10 +41,9 @@ const TONE_BAR: Record<WindowTone, string> = {
 function LimitBar({ label, w, now }: { label: string; w: ClaudeUsageWindow | null; now: number }) {
   const pct = w?.used_pct ?? null;
   const badge = stateLabel(w);
-  // "resets in ..." only describes a live window; a window that reset since it was read says when
-  // it was last read instead (a stale one already carries its age in the badge).
-  const countdown = w?.state === "current" ? resetCountdown(w.resets_at, now) : "";
-  const lastRead = w?.state === "reset" ? lastReadLabel(w, now) : "";
+  // "resets in ..." goes with any window that still has a percentage (a stale 100% says when it comes
+  // back); a window that is not a current reading also says when it was last read.
+  const { countdown, lastRead } = limitBarNotes(w, now);
   return (
     <div className="space-y-1">
       <div className="flex justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">

@@ -87,6 +87,23 @@ export function lastReadLabel(w: ClaudeUsageWindow | null | undefined, nowMs: nu
   return `last read ${ago(age)}${was}`;
 }
 
+/**
+ * The two notes a limit bar prints next to its percentage. The reset countdown goes with any window
+ * that still carries a percentage, current or stale, since a stale 100% is exactly when the reset time
+ * matters; resetCountdown itself returns "" (or "now" within 2 minutes) once the time has passed, so a
+ * forgotten reading cannot claim to reset "now". The last-read label goes with every window that is
+ * not a current reading (stale or reset).
+ */
+export function limitBarNotes(
+  w: ClaudeUsageWindow | null | undefined,
+  nowMs: number,
+): { countdown: string; lastRead: string } {
+  return {
+    countdown: w?.used_pct != null ? resetCountdown(w.resets_at, nowMs) : "",
+    lastRead: w && w.state !== "current" ? lastReadLabel(w, nowMs) : "",
+  };
+}
+
 /** 2_565_300_000 -> "2.6B", 5_480_000 -> "5.5M", 12_300 -> "12.3K". */
 export function formatTokens(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
