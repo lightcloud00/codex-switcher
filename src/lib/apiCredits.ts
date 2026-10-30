@@ -1,14 +1,16 @@
+/** DeepSeek reports amounts as strings; the other providers as numbers. */
 export interface ApiCreditBalance {
   currency: string;
-  total: string;
-  granted?: string | null;
-  topped_up?: string | null;
+  total: string | number;
+  granted?: string | number | null;
+  topped_up?: string | number | null;
 }
 /** One provider row of `api-credit-probe`. A failed row carries `error` instead of the balance fields. */
 export interface ApiCreditRow {
   id: string;
   label: string;
-  credential: string;
+  /** CredVault logical name; null for treg, whose own CLI holds its sign-in. */
+  credential: string | null;
   dashboard: string;
   observed_at: string;
   available?: boolean;
@@ -26,13 +28,15 @@ export interface ApiCreditRow {
   models?: string[];
   model_count?: number;
   quotas_in_use?: unknown[];
+  used_this_month?: number | null;
+  in_flight?: number;
 }
 export interface ApiCreditsSnapshot {
   schema: string;
   observed_at: string;
   providers: ApiCreditRow[];
 }
-function money(currency: string, amount: string): string {
+function money(currency: string, amount: string | number): string {
   return currency === "USD" ? `$${amount}` : `${currency} ${amount}`;
 }
 /** Shows the balance the provider reported, its own note when it has no balance API, and nothing for a failed row. */
