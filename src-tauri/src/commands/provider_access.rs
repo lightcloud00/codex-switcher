@@ -134,6 +134,10 @@ impl SignIn {
 }
 const NOT_CHECKED: &str = "not checked";
 const CHECK_FAILED: &str = "check failed";
+/// The probes run after the dates are already shown, so a slow CLI costs a label, not the tab.
+const PROBE_TIMEOUT_SECS: u64 = 10;
+/// Windows has no probe yet; it reports "not checked" rather than a check that never ran.
+const PROBES_SUPPORTED: bool = cfg!(not(windows));
 /// Read-only status probe: fixed argv, no stdin, stderr dropped, stdout capped and handed only
 /// to the caller's parser (never logged or returned). Timeout, spawn failure or a read error is None.
 #[cfg(not(windows))]
@@ -252,10 +256,13 @@ async fn check_sign_in(id: &str, enabled: bool) -> SignInCheck {
         "credvault" => ("credvault", &["status"]),
         _ => return unchecked,
     };
-    let Some(binary) = enabled.then(|| find_binary(bin)).flatten() else {
+    let Some(binary) = (enabled && PROBES_SUPPORTED)
+        .then(|| find_binary(bin))
+        .flatten()
+    else {
         return unchecked;
     };
-    let (state, detail) = match probe(binary, args, 10).await {
+    let (state, detail) = match probe(binary, args, PROBE_TIMEOUT_SECS).await {
         Some((exit_ok, stdout)) => classify(id, exit_ok, &stdout),
         None => (SignIn::Unknown, CHECK_FAILED),
     };
@@ -265,24 +272,21 @@ async fn check_sign_in(id: &str, enabled: bool) -> SignInCheck {
         checked_at: Some(Utc::now().to_rfc3339()),
     }
 }
-#[tauri::command]
-pub async fn get_provider_access() -> Result<serde_json::Value, String> {
-    provider_access_snapshot(true).await
-}
-/// `probe` false runs no CLI at all (the LAN web route), so sign-in stays "unknown" there.
-pub async fn provider_access_snapshot(probe: bool) -> Result<serde_json::Value, String> {
-    let defs: [(&str, &str, &[&str]); 3] = [
-        ("grok", "Grok", &["grok"]),
-        ("cursor", "Cursor", &["cursor-agent", "cursor"]),
-        ("credvault", "CredVault", &["credvault", "credvault-mac"]),
-    ];
-    let installed = defs.map(|(_, _, bins)| bins.iter().any(|b| find_binary(b).is_some()));
+const PROVIDERS: [(&str, &str, &[&str]); 3] = [
+    ("grok", "Grok", &["grok"]),
+    ("cursor", "Cursor", &["cursor-agent", "cursor"]),
+    ("credvault", "CredVault", &["credvault", "credvault-mac"]),
+];
+/// Provider rows without the dates file. `probe` false runs no CLI at all, so every sign-in stays
+/// "unknown" and unstamped; the three probes run concurrently and only for installed providers.
+async fn provider_rows(probe: bool) -> Vec<serde_json::Value> {
+    let installed = PROVIDERS.map(|(_, _, bins)| bins.iter().any(|b| find_binary(b).is_some()));
     let (grok, cursor, credvault) = tokio::join!(
         check_sign_in("grok", probe && installed[0]),
         check_sign_in("cursor", probe && installed[1]),
         check_sign_in("credvault", probe && installed[2]),
     );
-    let providers = defs
+    PROVIDERS
         .iter()
         .zip(installed)
         .zip([grok, cursor, credvault])
@@ -293,10 +297,25 @@ pub async fn provider_access_snapshot(probe: bool) -> Result<serde_json::Value, 
                 "signInCheckedAt": check.checked_at,
             })
         })
-        .collect::<Vec<_>>();
-    Ok(
-        serde_json::json!({"checkedAt": Utc::now().to_rfc3339(), "providers": providers, "plans": read_dates()?}),
-    )
+        .collect()
+}
+/// Never probes: installed state and dates only, so it answers at once and is safe on the LAN route.
+async fn access_snapshot(plans: Vec<PlanDates>) -> serde_json::Value {
+    serde_json::json!({
+        "checkedAt": Utc::now().to_rfc3339(),
+        "providers": provider_rows(false).await,
+        "plans": plans,
+    })
+}
+#[tauri::command]
+pub async fn get_provider_access() -> Result<serde_json::Value, String> {
+    Ok(access_snapshot(read_dates()?).await)
+}
+/// The read-only sign-in probes, kept apart from `get_provider_access` so a slow CLI never blocks
+/// the tab. Desktop only: the LAN web route does not expose it, so no CLI runs for LAN callers.
+#[tauri::command]
+pub async fn check_provider_sign_in() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({ "providers": provider_rows(true).await }))
 }
 #[tauri::command]
 pub async fn save_provider_dates(plans: Vec<PlanDates>) -> Result<(), String> {
@@ -526,10 +545,44 @@ mod tests {
     }
     #[cfg(not(windows))]
     #[tokio::test]
-    async fn probe_times_out_a_hung_child() {
+    async fn probe_gives_the_child_a_closed_stdin() {
+        // `cat` with an open stdin would block until the timeout; a null stdin ends it at once.
         let started = std::time::Instant::now();
-        assert_eq!(probe("/bin/sleep".into(), &["30"], 1).await, None);
+        assert_eq!(
+            probe("/bin/cat".into(), &[], 10).await,
+            Some((true, String::new()))
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+    #[cfg(not(windows))]
+    fn process_is_gone(pid: &str) -> bool {
+        // A killed child can linger as a zombie until tokio reaps it, which still counts as dead.
+        let out = std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        stat.trim().is_empty() || stat.trim().starts_with('Z')
+    }
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn probe_times_out_a_hung_child_and_kills_it() {
+        let pid_file = std::env::temp_dir().join(format!("probe-pid-{}", uuid::Uuid::new_v4()));
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let started = std::time::Instant::now();
+        assert_eq!(probe("/bin/sh".into(), &["-c", &script], 2).await, None);
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let pid = std::fs::read_to_string(&pid_file).expect("the child never started");
+        std::fs::remove_file(&pid_file).ok();
+        let pid = pid.trim();
+        assert!(!pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        for _ in 0..100 {
+            if process_is_gone(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("timed-out probe left child {pid} running");
     }
     #[tokio::test]
     async fn disabled_check_runs_no_cli_and_reports_unknown() {
@@ -539,5 +592,33 @@ mod tests {
             assert_eq!(check.detail, NOT_CHECKED);
             assert!(check.checked_at.is_none());
         }
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_reports_not_checked_instead_of_a_failed_check() {
+        for id in ["grok", "cursor", "credvault"] {
+            let check = check_sign_in(id, true).await;
+            assert_eq!(check.state, SignIn::Unknown);
+            assert_eq!(check.detail, NOT_CHECKED);
+            assert!(check.checked_at.is_none());
+        }
+    }
+    #[tokio::test]
+    async fn snapshot_without_probing_leaves_every_provider_unknown_and_unstamped() {
+        // Backs the LAN route: get_provider_access is built from this and must run no CLI.
+        let snapshot = access_snapshot(vec![plan("x-subscription", "2026-11-13")]).await;
+        let providers = snapshot["providers"].as_array().unwrap();
+        let ids: Vec<_> = providers
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["grok", "cursor", "credvault"]);
+        for p in providers {
+            assert_eq!(p["signedIn"], "unknown", "{p}");
+            assert_eq!(p["signInDetail"], NOT_CHECKED, "{p}");
+            assert!(p["signInCheckedAt"].is_null(), "{p}");
+        }
+        assert_eq!(snapshot["plans"][0]["billingRenewsOn"], "2026-11-13");
+        assert!(snapshot["checkedAt"].is_string());
     }
 }

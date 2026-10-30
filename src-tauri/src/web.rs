@@ -13,11 +13,11 @@ use crate::commands::{
     add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, fetch_claude_seats, fetch_claude_usage, fetch_usage,
-    get_account_usage_stats, get_active_account_info, get_masked_account_ids,
+    get_account_usage_stats, get_active_account_info, get_masked_account_ids, get_provider_access,
     import_accounts_full_encrypted_bytes, import_accounts_slim_text, kill_codex_processes,
-    list_accounts, provider_access_snapshot, refresh_account_metadata, refresh_all_accounts_usage,
-    rename_account, save_provider_dates, set_masked_account_ids, start_login, switch_account,
-    warmup_account, warmup_all_accounts, PlanDates,
+    list_accounts, refresh_account_metadata, refresh_all_accounts_usage, rename_account,
+    save_provider_dates, set_masked_account_ids, start_login, switch_account, warmup_account,
+    warmup_all_accounts, PlanDates,
 };
 
 #[derive(Debug, Deserialize)]
@@ -146,8 +146,9 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let args: UploadAuthJsonArgs = parse_args(payload)?;
             to_json(add_account_from_auth_json_text(args.name, args.contents).await?)
         }
-        // LAN callers get no sign-in probe: no local CLI runs on their behalf.
-        "get_provider_access" => provider_access_snapshot(false).await,
+        // Installed state and dates only. The sign-in probes (`check_provider_sign_in`) are desktop-only,
+        // so no local CLI runs for LAN callers.
+        "get_provider_access" => get_provider_access().await,
         "save_provider_dates" => {
             #[derive(Deserialize)]
             struct Args {
@@ -350,5 +351,18 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lan_route_does_not_expose_the_sign_in_probe() {
+        let err = invoke_web_command("check_provider_sign_in", json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("Unsupported web command"), "{err}");
     }
 }

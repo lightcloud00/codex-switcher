@@ -22,8 +22,8 @@ export function dateStatus(value: string | null, now = new Date()): string {
 }
 export type SignIn = "yes" | "no" | "unknown";
 /** Only a positive CLI status reads as signed in; anything the backend could not observe stays unverified. */
-export function signInLabel(s: SignIn): string {
-  return s === "yes" ? "signed in" : s === "no" ? "not signed in" : "sign-in unverified";
+export function signInLabel(s: SignIn, checking = false): string {
+  return s === "yes" ? "signed in" : s === "no" ? "not signed in" : checking ? "checking sign-in…" : "sign-in unverified";
 }
 export function dateChanged(value: string | null, saved: string | null): boolean {
   return (value || null) !== (saved || null);
@@ -40,4 +40,13 @@ export function hasUnsavedDates(plans: PlanDates[], saved: PlanDates[]): boolean
       || dateChanged(p.creditExpiresOn, s?.creditExpiresOn ?? null)
       || dateChanged(p.credentialExpiresOn, s?.credentialExpiresOn ?? null);
   });
+}
+export interface PlanView<A extends { plans: PlanDates[] }> {
+  data: A | null;
+  saved: PlanDates[];
+}
+/** A refresh replaces the provider status but never discards dates the user typed and has not saved. */
+export function mergeRefresh<A extends { plans: PlanDates[] }>(view: PlanView<A>, next: A): PlanView<A> {
+  if (view.data && hasUnsavedDates(view.data.plans, view.saved)) return { data: { ...next, plans: view.data.plans }, saved: view.saved };
+  return { data: next, saved: next.plans.map(p => ({ ...p })) };
 }

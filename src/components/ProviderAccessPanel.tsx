@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime, openExternalUrl } from "../lib/platform";
-import { dateChanged, hasUnsavedDates, pendingDateLabel, PLAN_LABELS, signInLabel, type PlanDates, type SignIn } from "../lib/providerAccess";
+import { dateChanged, hasUnsavedDates, mergeRefresh, pendingDateLabel, PLAN_LABELS, signInLabel, type PlanDates, type PlanView, type SignIn } from "../lib/providerAccess";
 interface Provider { id: string; label: string; installed: boolean; signedIn: SignIn; signInDetail: string; signInCheckedAt: string | null }
 interface Access { checkedAt: string; providers: Provider[]; plans: PlanDates[] }
 const DETAILS: Record<string, { text: string; command: string; url: string }> = {
@@ -11,25 +11,43 @@ const DETAILS: Record<string, { text: string; command: string; url: string }> = 
 const SIGN_IN_TONE: Record<SignIn, string> = { yes: "text-green-700 dark:text-green-300", no: "text-amber-700 dark:text-amber-300", unknown: "text-gray-500" };
 const copyPlans = (plans: PlanDates[]) => plans.map(p => ({ ...p }));
 export function ProviderAccessPanel() {
-  const [data, setData] = useState<Access | null>(null);
-  const [saved, setSaved] = useState<PlanDates[]>([]);
+  const [view, setView] = useState<PlanView<Access>>({ data: null, saved: [] });
+  const { data, saved } = view;
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  async function refresh() { setBusy(true); setError(""); try { const next = await invokeBackend<Access>("get_provider_access"); setData(next); setSaved(copyPlans(next.plans)); } catch(e) { setError(String(e)); } finally { setBusy(false); } }
+  const [checking, setChecking] = useState(false);
+  const latest = useRef(0);
+  // Dates and installed state come back at once; the slower sign-in probes fill in afterwards. A newer refresh supersedes an older one.
+  async function refresh() {
+    const run = ++latest.current;
+    const current = () => run === latest.current;
+    setBusy(true); setChecking(false); setError("");
+    try {
+      const next = await invokeBackend<Access>("get_provider_access");
+      if (!current()) return;
+      setView(old => mergeRefresh(old, next));
+    } catch(e) { if (current()) setError(String(e)); return; } finally { if (current()) setBusy(false); }
+    if (!isTauriRuntime()) return;
+    setChecking(true);
+    try {
+      const { providers } = await invokeBackend<{ providers: Provider[] }>("check_provider_sign_in");
+      if (current()) setView(old => old.data ? { ...old, data: { ...old.data, providers } } : old);
+    } catch(e) { if (current()) setError(String(e)); } finally { if (current()) setChecking(false); }
+  }
   useEffect(() => { void refresh(); }, []);
   function edit(id: string, key: keyof Omit<PlanDates, "id">, value: string) {
-    setData(old => old && ({...old, plans: old.plans.map(p => p.id === id ? {...p, [key]: value || null} : p)})); setMessage("");
+    setView(old => old.data ? { ...old, data: { ...old.data, plans: old.data.plans.map(p => p.id === id ? {...p, [key]: value || null} : p) } } : old); setMessage("");
   }
-  async function save() { if (!data) return; const plans = data.plans; setBusy(true); setError(""); try { await invokeBackend("save_provider_dates", {plans}); setSaved(copyPlans(plans)); setMessage("Dates saved on this computer."); } catch(e) { setError(String(e)); } finally { setBusy(false); } }
+  async function save() { if (!data) return; const plans = data.plans; setBusy(true); setError(""); try { await invokeBackend("save_provider_dates", {plans}); setView(old => ({ ...old, saved: copyPlans(plans) })); setMessage("Dates saved on this computer."); } catch(e) { setError(String(e)); } finally { setBusy(false); } }
   async function launch(id: string) { setError(""); try { await invokeBackend("launch_provider", {provider: id}); setMessage(id === "credvault" ? "CredVault status check completed." : "Opened provider. Tool access depends on its active client and permissions."); } catch(e) { setError(String(e)); } }
   const unsavedDates = !!data && hasUnsavedDates(data.plans, saved);
   return <section aria-label="Provider access" className="space-y-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} disabled={busy} className="rounded-lg border px-3 py-2 text-sm">{busy ? "Checking…" : "Refresh local status"}</button></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} disabled={busy || checking} className="rounded-lg border px-3 py-2 text-sm">{busy ? "Refreshing…" : checking ? "Checking sign-in…" : "Refresh local status"}</button></div>
     {error && <p role="alert" className="text-red-600 dark:text-red-300">{error}</p>}
     {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
     <div className="grid gap-3 md:grid-cols-3">{data?.providers.map(p => <article key={p.id} className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-3">
-      <h3 className="font-semibold">{p.label}</h3><p className="text-xs text-gray-500">{p.installed ? "CLI found" : "CLI not found in checked locations"} · <span title={p.signInDetail} className={SIGN_IN_TONE[p.signedIn] ?? SIGN_IN_TONE.unknown}>{signInLabel(p.signedIn)}</span></p>
+      <h3 className="font-semibold">{p.label}</h3><p className="text-xs text-gray-500">{p.installed ? "CLI found" : "CLI not found in checked locations"} · <span title={p.signInDetail} className={SIGN_IN_TONE[p.signedIn] ?? SIGN_IN_TONE.unknown}>{signInLabel(p.signedIn, checking && p.installed)}</span></p>
       {p.signInDetail && <p className="text-[11px] text-gray-400">{p.signInDetail}</p>}
       <p className="text-sm">{DETAILS[p.id]?.text}</p><code className="block break-all text-xs">{DETAILS[p.id]?.command}</code>
       <div className="flex flex-wrap gap-2">{isTauriRuntime() && <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void launch(p.id)}>{p.id === "credvault" ? "Check CredVault" : `Open ${p.label}`}</button>}
