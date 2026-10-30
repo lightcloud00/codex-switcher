@@ -17,7 +17,8 @@
       "profile": "/home/example/.claude-profiles/main",
       "binary": "/home/example/bin/claude",
       "identity_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
-      "expected_plan": "max"
+      "expected_plan": "max",
+      "usage_account": "mac-main-max"
     },
     {
       "id": "claude-mac-gustavo",
@@ -26,7 +27,8 @@
       "profile": "/home/example/.claude-profiles/gustavo",
       "binary": "/home/example/bin/claude",
       "identity_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
-      "expected_plan": "max"
+      "expected_plan": "max",
+      "usage_account": "mac-gustavo-max"
     },
     {
       "id": "claude-windows",
@@ -35,7 +37,8 @@
       "profile": "C:\\Users\\example\\.claude",
       "binary": "C:\\example\\claude.cmd",
       "identity_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
-      "expected_plan": "max"
+      "expected_plan": "max",
+      "usage_account": "windows-max"
     },
     {
       "id": "claude-wsl",
@@ -44,7 +47,8 @@
       "profile": "/home/example/.claude",
       "binary": "/home/example/.npm-global/bin/claude",
       "identity_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
-      "expected_plan": "max"
+      "expected_plan": "max",
+      "usage_account": "wsl-max"
     }
   ]
 }

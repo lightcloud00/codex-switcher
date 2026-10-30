@@ -121,9 +121,11 @@ pub struct RegistrySeat {
     pub id: String,
     pub host: Option<String>,
     pub plan: Option<String>,
+    /// The label claude-usage reports this seat under; the primary key of the usage join.
+    pub usage_account: Option<String>,
 }
 
-fn safe_token(value: &str) -> bool {
+pub(crate) fn safe_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
@@ -174,6 +176,7 @@ pub fn parse_seat_registry(raw: &str) -> Result<Vec<RegistrySeat>, String> {
             id: id.to_string(),
             host: token("host"),
             plan: token("expected_plan"),
+            usage_account: token("usage_account"),
         });
     }
     Ok(seats)
@@ -330,6 +333,22 @@ fn lane_reset(
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+/// Usage labels to try for a seat, best first and without repeats: the seat id, the registry's
+/// `usage_account` (what claude-usage really calls the seat), then the table's fallback labels.
+fn seat_labels(id: &str, usage_account: Option<&str>, fallback: &[String]) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    for label in [Some(id), usage_account]
+        .into_iter()
+        .flatten()
+        .chain(fallback.iter().map(String::as_str))
+    {
+        if !labels.iter().any(|seen| seen == label) {
+            labels.push(label.to_string());
+        }
+    }
+    labels
+}
+
 /// Every known seat plus any extra registry seat, each joined to its claude-usage account.
 ///
 /// `accounts` is the summary's `accounts` array, or `None` when no usable summary exists (every
@@ -345,32 +364,37 @@ pub fn merge_seats(
     let registry = registry.unwrap_or(&[]);
     let mut defs: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
     for known in &table.seats {
-        let plan = registry
-            .iter()
-            .find(|seat| seat.id == known.id)
+        let entry = registry.iter().find(|seat| seat.id == known.id);
+        let plan = entry
             .and_then(|seat| seat.plan.clone())
             .unwrap_or_else(|| known.plan.clone());
-        let mut labels = vec![known.id.clone()];
-        labels.extend(known.usage_labels.iter().cloned());
+        let usage_account = entry.and_then(|seat| seat.usage_account.as_deref());
+        let labels = seat_labels(&known.id, usage_account, &known.usage_labels);
         defs.push((known.id.clone(), Some(plan), labels));
     }
     for seat in registry {
         if table.seats.iter().all(|known| known.id != seat.id) {
-            defs.push((seat.id.clone(), seat.plan.clone(), vec![seat.id.clone()]));
+            let labels = seat_labels(&seat.id, seat.usage_account.as_deref(), &[]);
+            defs.push((seat.id.clone(), seat.plan.clone(), labels));
         }
     }
 
     defs.into_iter()
         .map(|(seat_id, plan, labels)| {
-            let matches: Vec<&Value> = accounts
+            let rank = |a: &Value| {
+                a.get("account")
+                    .and_then(Value::as_str)
+                    .and_then(|name| labels.iter().position(|label| label == name))
+                    .unwrap_or(usize::MAX)
+            };
+            let mut matches: Vec<&Value> = accounts
                 .unwrap_or(&[])
                 .iter()
-                .filter(|a| {
-                    a.get("account")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| labels.iter().any(|label| label == name))
-                })
+                .filter(|a| rank(a) != usize::MAX)
                 .collect();
+            // Primary label first (stable, so CLI order breaks ties); the first account with a
+            // reading wins, otherwise the primary label's account stands for the seat.
+            matches.sort_by_key(|a| rank(a));
             let usage = matches
                 .iter()
                 .copied()
@@ -492,7 +516,10 @@ mod tests {
                 .find(|a| a["account"] == name)
                 .map(|a| a["email"].clone())
         };
-        assert_eq!(email("mac-gustavo-max"), Some(Value::from("mac-gustavo-max@example.com")));
+        assert_eq!(
+            email("mac-gustavo-max"),
+            Some(Value::from("mac-gustavo-max@example.com"))
+        );
         assert_eq!(email("wsl-max"), Some(Value::Null));
     }
 
@@ -552,6 +579,17 @@ mod tests {
         );
         assert_eq!(seats[2].host.as_deref(), Some("win"));
         assert_eq!(seats[2].plan.as_deref(), Some("max"));
+        let accounts: Vec<Option<&str>> =
+            seats.iter().map(|s| s.usage_account.as_deref()).collect();
+        assert_eq!(
+            accounts,
+            [
+                Some("mac-main-max"),
+                Some("mac-gustavo-max"),
+                Some("windows-max"),
+                Some("wsl-max")
+            ]
+        );
         // Profile paths, binaries and identity hashes never reach the payload.
         let rendered = serde_json::to_string(&seats).unwrap();
         for hidden in ["profile", "binary", "identity", "example", "1111"] {
@@ -562,10 +600,11 @@ mod tests {
     #[test]
     fn registry_skips_bad_rows_and_rejects_wrong_schema() {
         let raw = r#"{"schema":"aos.subscription_accounts.v1","accounts":[
-            {"id":"claude-a","cli":"claude","host":"mac","expected_plan":"max"},
+            {"id":"claude-a","cli":"claude","host":"mac","expected_plan":"max","usage_account":"a-max"},
             {"id":"claude-a","cli":"claude","host":"win"},
             {"id":"Claude B!","cli":"claude"},
-            {"id":"claude-c","cli":"claude","host":"MAC OS","expected_plan":7},
+            {"id":"claude-c","cli":"claude","host":"MAC OS","expected_plan":7,"usage_account":"Not A Token"},
+            {"id":"claude-d","cli":"claude","usage_account":42},
             {"cli":"claude"},
             "not an object"
         ]}"#;
@@ -576,12 +615,20 @@ mod tests {
                 RegistrySeat {
                     id: "claude-a".into(),
                     host: Some("mac".into()),
-                    plan: Some("max".into())
+                    plan: Some("max".into()),
+                    usage_account: Some("a-max".into()),
                 },
                 RegistrySeat {
                     id: "claude-c".into(),
                     host: None,
-                    plan: None
+                    plan: None,
+                    usage_account: None,
+                },
+                RegistrySeat {
+                    id: "claude-d".into(),
+                    host: None,
+                    plan: None,
+                    usage_account: None,
                 },
             ]
         );
@@ -666,7 +713,106 @@ mod tests {
         assert_eq!(seat.used_7d_pct, Some(1.0));
         let only_default = vec![account("mac-max", Some(80.0), Some(90.0))];
         let seats = merge_seats(Some(&registry()), Some(&only_default), fixture_now());
-        assert_eq!(reading(&seats, "claude-mac-gustavo").status, SeatStatus::NoUsageYet);
+        assert_eq!(
+            reading(&seats, "claude-mac-gustavo").status,
+            SeatStatus::NoUsageYet
+        );
+    }
+
+    /// The Claude tab as Gus saw it on 2026-10-30: the retired claude-gustavo probe (reset 17 days ago),
+    /// the default login mac-max (probe error) and the live mac-gustavo-max, in that CLI order.
+    fn live_shaped_accounts() -> Vec<Value> {
+        vec![
+            json!({"account": "claude-gustavo", "probe_error": null,
+                "five_hour": {"used_pct": null, "last_used_pct": 40.0, "state": "reset",
+                    "resets_at": "2026-10-13T03:10:00Z"},
+                "seven_day": {"used_pct": null, "last_used_pct": 40.0, "state": "reset",
+                    "resets_at": "2026-10-13T03:10:00Z"}}),
+            json!({"account": "mac-gustavo-max", "probe_error": null,
+                "five_hour": window(Some(9.0), "2026-10-30T12:30:00Z"),
+                "seven_day": window(Some(61.0), "2026-11-04T20:00:00Z")}),
+            json!({"account": "mac-max", "five_hour": null, "seven_day": null,
+                "probe_error": "usage output had no limit lines"}),
+        ]
+    }
+
+    #[test]
+    fn a_live_shaped_summary_gives_the_gustavo_seat_its_numbers() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 30, 12, 22, 0).unwrap();
+        let accounts = live_shaped_accounts();
+        let seats = merge_seats(Some(&registry()), Some(&accounts), now);
+        let gustavo = reading(&seats, "claude-mac-gustavo");
+        assert_eq!(gustavo.used_5h_pct, Some(9.0));
+        assert_eq!(gustavo.used_7d_pct, Some(61.0));
+        assert_eq!(gustavo.status, SeatStatus::Ok);
+        assert_eq!(gustavo.resets_at.as_deref(), Some("2026-11-04T20:00:00Z"));
+    }
+
+    #[test]
+    fn registry_usage_account_beats_the_table_labels() {
+        let now = fixture_now();
+        // The registry renamed the seat's usage label; the table still lists the old one.
+        let renamed: Vec<RegistrySeat> = registry()
+            .into_iter()
+            .map(|mut seat| {
+                if seat.id == "claude-mac-gustavo" {
+                    seat.usage_account = Some("gus-renamed-max".into());
+                }
+                seat
+            })
+            .collect();
+        // Both labels have a reading; the registry's label is the primary one, whatever the CLI order.
+        for accounts in [
+            vec![
+                account("mac-gustavo-max", Some(70.0), Some(80.0)),
+                account("gus-renamed-max", Some(9.0), Some(61.0)),
+            ],
+            vec![
+                account("gus-renamed-max", Some(9.0), Some(61.0)),
+                account("mac-gustavo-max", Some(70.0), Some(80.0)),
+            ],
+        ] {
+            let seats = merge_seats(Some(&renamed), Some(&accounts), now);
+            let seat = reading(&seats, "claude-mac-gustavo");
+            assert_eq!(seat.used_5h_pct, Some(9.0));
+            assert_eq!(seat.used_7d_pct, Some(61.0));
+        }
+        // Without a reading on the primary label, the table's fallback label still supplies one.
+        let fallback_only = vec![account("mac-gustavo-max", Some(70.0), Some(80.0))];
+        let seats = merge_seats(Some(&renamed), Some(&fallback_only), now);
+        assert_eq!(
+            reading(&seats, "claude-mac-gustavo").used_7d_pct,
+            Some(80.0)
+        );
+    }
+
+    #[test]
+    fn a_registry_only_seat_joins_usage_through_its_usage_account() {
+        let registry = vec![RegistrySeat {
+            id: "claude-lab-1".into(),
+            host: Some("wsl".into()),
+            plan: Some("max".into()),
+            usage_account: Some("lab-spare-max".into()),
+        }];
+        let accounts = vec![account("lab-spare-max", Some(4.0), Some(8.0))];
+        let seats = merge_seats(Some(&registry), Some(&accounts), fixture_now());
+        let lab = reading(&seats, "claude-lab-1");
+        assert_eq!(lab.used_7d_pct, Some(8.0));
+        assert_eq!(lab.status, SeatStatus::Ok);
+    }
+
+    #[test]
+    fn seat_labels_are_ordered_and_deduplicated() {
+        let fallback = vec!["mac-gustavo-max".to_string(), "legacy".to_string()];
+        assert_eq!(
+            seat_labels("claude-mac-gustavo", Some("mac-gustavo-max"), &fallback),
+            ["claude-mac-gustavo", "mac-gustavo-max", "legacy"]
+        );
+        assert_eq!(
+            seat_labels("claude-mac-gustavo", None, &fallback),
+            ["claude-mac-gustavo", "mac-gustavo-max", "legacy"]
+        );
+        assert_eq!(seat_labels("claude-x", Some("claude-x"), &[]), ["claude-x"]);
     }
 
     #[test]
@@ -778,6 +924,7 @@ mod tests {
             id: "claude-lab-1".into(),
             host: Some("wsl".into()),
             plan: Some("something-odd".into()),
+            usage_account: None,
         }];
         let accounts = vec![account("claude-lab-1", Some(1.0), Some(2.0))];
         let seats = merge_seats(Some(&registry), Some(&accounts), fixture_now());
