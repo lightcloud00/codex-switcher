@@ -154,7 +154,7 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
 /// Codex owns an account's tokens only while it is the active account and
 /// auth.json, if present, still holds it. Otherwise a refresh cannot race
 /// Codex, and auth.json belongs to a login made outside the switcher.
-fn codex_uses_account(
+pub(crate) fn codex_uses_account(
     store: &AccountsStore,
     account: &StoredAccount,
     live_auth: Option<&AuthDotJson>,
@@ -172,12 +172,7 @@ fn load_account_reconciling_live_auth(account_id: &str) -> Result<(StoredAccount
         Err(err) if store.active_account_id.as_deref() == Some(account_id) => return Err(err),
         Err(_) => None,
     };
-
-    if let Some(auth) = &live_auth {
-        if reconcile_active_account_with_live_auth(&mut store, auth) {
-            save_accounts(&store)?;
-        }
-    }
+    reconcile_and_save(&mut store, live_auth.as_ref())?;
 
     let account = store
         .accounts
@@ -187,6 +182,49 @@ fn load_account_reconciling_live_auth(account_id: &str) -> Result<(StoredAccount
         .context("Account not found")?;
     let is_active = codex_uses_account(&store, &account, live_auth.as_ref());
     Ok((account, is_active))
+}
+
+/// Fold Codex's live login into the store and persist what changed. Callers
+/// hold AUTH_OPERATION_LOCK.
+fn reconcile_and_save(store: &mut AccountsStore, live_auth: Option<&AuthDotJson>) -> Result<()> {
+    if let Some(auth) = live_auth {
+        if reconcile_active_account_with_live_auth(store, auth) {
+            save_accounts(store)?;
+        }
+    }
+    Ok(())
+}
+
+/// The store and Codex's live login for the re-login path. Unlike a refresh,
+/// an unreadable auth.json does not block the active account: re-login
+/// rewrites it, and without a readable file the active account still counts
+/// as Codex's.
+fn load_store_and_live_auth() -> Result<(AccountsStore, Option<AuthDotJson>)> {
+    Ok((load_accounts()?, read_current_auth().ok().flatten()))
+}
+
+/// The store reconciled against Codex's live login, persisted like a refresh
+/// does, so a stale active id cannot decide who owns auth.json. Callers hold
+/// AUTH_OPERATION_LOCK.
+pub(crate) fn load_store_reconciled() -> Result<(AccountsStore, Option<AuthDotJson>)> {
+    let (mut store, live_auth) = load_store_and_live_auth()?;
+    reconcile_and_save(&mut store, live_auth.as_ref())?;
+    Ok((store, live_auth))
+}
+
+/// Whether Codex holds this account right now. Read-only: callers need not
+/// hold AUTH_OPERATION_LOCK, so it reconciles a throwaway copy and saves nothing.
+pub(crate) fn codex_holds_account(account_id: &str) -> Result<bool> {
+    let (mut store, live_auth) = load_store_and_live_auth()?;
+    if let Some(auth) = &live_auth {
+        reconcile_active_account_with_live_auth(&mut store, auth);
+    }
+    let account = store
+        .accounts
+        .iter()
+        .find(|stored| stored.id == account_id)
+        .context("Account not found")?;
+    Ok(codex_uses_account(&store, account, live_auth.as_ref()))
 }
 
 /// Build a new ChatGPT account from a refresh token.
@@ -355,14 +393,14 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 #[cfg(test)]
 mod tests {
     use super::{
-        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, codex_uses_account,
-        load_account_reconciling_live_auth, merge_refresh_response, resolve_refreshed_id_token,
-        RefreshTokenResponse,
+        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, codex_holds_account,
+        codex_uses_account, load_account_reconciling_live_auth, merge_refresh_response,
+        resolve_refreshed_id_token, RefreshTokenResponse,
     };
     use crate::auth::test_support::TestHome;
     use crate::auth::{
-        get_codex_auth_file, load_accounts, reconcile_active_account_with_live_auth, save_accounts,
-        switch_to_account,
+        get_accounts_file, get_codex_auth_file, load_accounts,
+        reconcile_active_account_with_live_auth, save_accounts, switch_to_account,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -530,6 +568,47 @@ mod tests {
             &active,
             Some(&live_auth("workspace-elsewhere", now))
         ));
+    }
+
+    #[test]
+    fn codex_holds_account_reads_ownership_without_saving_reconciliation() {
+        let _home = TestHome::new();
+        let now = chrono::Utc::now().timestamp();
+        let active = chatgpt_account("Active", "workspace-a", now);
+        let other = chatgpt_account("Other", "workspace-b", now);
+        save_accounts(&AccountsStore {
+            accounts: vec![active.clone(), other.clone()],
+            active_account_id: Some(active.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+        let store_before = std::fs::read(get_accounts_file().unwrap()).unwrap();
+
+        // No auth.json: nothing contradicts the stored active account.
+        assert!(codex_holds_account(&active.id).unwrap());
+        assert!(!codex_holds_account(&other.id).unwrap());
+
+        // auth.json holds the active account.
+        switch_to_account(&active).unwrap();
+        assert!(codex_holds_account(&active.id).unwrap());
+
+        // A login the switcher does not store: Codex does not hold the stale
+        // active account.
+        switch_to_account(&chatgpt_account("Foreign", "workspace-elsewhere", now)).unwrap();
+        assert!(!codex_holds_account(&active.id).unwrap());
+        assert!(!codex_holds_account(&other.id).unwrap());
+
+        // A stored login that is not the active one: Codex holds that account,
+        // but the answer must not adopt it in accounts.json.
+        switch_to_account(&other).unwrap();
+        assert!(!codex_holds_account(&active.id).unwrap());
+        assert!(codex_holds_account(&other.id).unwrap());
+        assert_eq!(
+            std::fs::read(get_accounts_file().unwrap()).unwrap(),
+            store_before
+        );
+
+        assert!(codex_holds_account("missing").is_err());
     }
 
     #[test]

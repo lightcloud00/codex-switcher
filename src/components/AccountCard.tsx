@@ -3,6 +3,7 @@ import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, A
 import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
+import { describeAuthFailure } from "../lib/accountAuth";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -11,6 +12,7 @@ const USAGE_STATS_OPEN_STORAGE_KEY_PREFIX = "usage-stats-open:";
 interface AccountCardProps {
   account: AccountWithUsage;
   onSwitch: () => void;
+  onRelogin: () => void;
   onWarmup: () => Promise<void>;
   onDelete: () => void;
   onRefresh: () => Promise<unknown>;
@@ -98,6 +100,7 @@ export function BlurredText({ children, blur }: { children: React.ReactNode; blu
 export function AccountCard({
   account,
   onSwitch,
+  onRelogin,
   onWarmup,
   onDelete,
   onRefresh,
@@ -216,6 +219,8 @@ export function AccountCard({
     account.auth_mode === "chat_g_p_t" && account.plan_type?.toLowerCase() !== "free";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
   const compactResetCredits = !account.is_active;
+  const authFailure =
+    account.auth_mode === "chat_g_p_t" ? describeAuthFailure(account.usage?.error) : null;
 
   const loadResetCredits = useCallback(async () => {
     const requestId = ++resetRequestSeq.current;
@@ -350,9 +355,29 @@ export function AccountCard({
       </div>
 
       {/* Usage */}
-      <div className="mb-3">
-        <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
+      <div className="mb-3 empty:hidden">
+        <UsageBar
+          usage={account.usage}
+          loading={isRefreshing || account.usageLoading}
+          hideError={!!authFailure}
+        />
       </div>
+
+      {authFailure && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+          <span>
+            {authFailure.message}
+            {account.is_active && " Close Codex first."}
+          </span>
+          <button
+            onClick={onRelogin}
+            disabled={switching || switchDisabled}
+            className="rounded-lg border border-amber-300 px-3 py-1.5 font-medium hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900/40 disabled:opacity-50"
+          >
+            Re-login
+          </button>
+        </div>
+      )}
 
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">

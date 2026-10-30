@@ -3,6 +3,8 @@ import type { UsageInfo } from "../types";
 interface UsageBarProps {
   usage?: UsageInfo;
   loading?: boolean;
+  /** Render nothing for a usage error the caller already explains itself. */
+  hideError?: boolean;
 }
 
 function formatResetTime(resetAt: number | null | undefined): string {
@@ -82,7 +84,7 @@ function RateLimitBar({
   );
 }
 
-export function UsageBar({ usage, loading }: UsageBarProps) {
+export function UsageBar({ usage, loading, hideError }: UsageBarProps) {
   if (loading && !usage) {
     return (
       <div className="space-y-2">
@@ -105,6 +107,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
   }
 
   if (usage.error) {
+    if (hideError) return null;
     return (
       <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
         {usage.error}

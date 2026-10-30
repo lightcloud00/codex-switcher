@@ -1,8 +1,8 @@
 {
  "accounts": [
   {
-   "account": "mac-max",
-   "email": "mac-max@example.com",
+   "account": "mac-gustavo-max",
+   "email": "mac-gustavo-max@example.com",
    "five_hour": {
     "age_s": 203,
     "last_used_pct": 59.0,
@@ -135,7 +135,7 @@
  "sources": {
   "pool_error": null,
   "probed_accounts": [
-   "mac-max",
+   "mac-gustavo-max",
    "windows-max",
    "wsl-max"
   ],
