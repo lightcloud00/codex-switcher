@@ -366,3 +366,81 @@ fn inactive_relogin_never_requires_closing_codex() {
     .unwrap();
     assert!(!get_codex_auth_file().unwrap().exists());
 }
+
+#[test]
+fn active_relogin_does_not_overwrite_a_login_made_outside_the_switcher() {
+    let _home = TestHome::new();
+    let mut old = account("stale-active");
+    old.email = Some("same@example.test".into());
+    save_accounts(&AccountsStore {
+        accounts: vec![old.clone()],
+        active_account_id: Some(old.id.clone()),
+        ..AccountsStore::default()
+    })
+    .unwrap();
+    // Codex signed in to an account the switcher does not store.
+    switch_to_account(&account("foreign")).unwrap();
+    let auth_before = fs::read(get_codex_auth_file().unwrap()).unwrap();
+    let mut fresh = old.clone();
+    if let AuthData::ChatGPT { refresh_token, .. } = &mut fresh.auth_data {
+        *refresh_token = "renewed-stale-refresh".into();
+    }
+
+    save_relogin_with_check(&old.id, fresh, || panic!("must not be consulted")).unwrap();
+
+    assert_eq!(
+        fs::read(get_codex_auth_file().unwrap()).unwrap(),
+        auth_before
+    );
+    let store = load_accounts().unwrap();
+    let AuthData::ChatGPT { refresh_token, .. } = &store.accounts[0].auth_data else {
+        panic!("expected ChatGPT account");
+    };
+    assert_eq!(refresh_token, "renewed-stale-refresh");
+}
+
+#[test]
+fn relogin_of_the_account_live_auth_holds_adopts_it_before_renewing() {
+    let _home = TestHome::new();
+    let mut held = account("held");
+    held.email = Some("same@example.test".into());
+    let stale_active = account("stale-active");
+    save_accounts(&AccountsStore {
+        accounts: vec![stale_active.clone(), held.clone()],
+        active_account_id: Some(stale_active.id.clone()),
+        ..AccountsStore::default()
+    })
+    .unwrap();
+    // Codex holds `held` with a revoked refresh token while the store's active id is stale.
+    let mut live = held.clone();
+    if let AuthData::ChatGPT { refresh_token, .. } = &mut live.auth_data {
+        *refresh_token = "revoked-live-refresh".into();
+    }
+    switch_to_account(&live).unwrap();
+    let mut fresh = held.clone();
+    if let AuthData::ChatGPT { refresh_token, .. } = &mut fresh.auth_data {
+        *refresh_token = "renewed-held-refresh".into();
+    }
+
+    let checked = std::cell::Cell::new(false);
+    save_relogin_with_check(&held.id, fresh, || {
+        checked.set(true);
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(checked.get());
+    let store = load_accounts().unwrap();
+    assert_eq!(store.active_account_id, Some(held.id.clone()));
+    let auth = crate::auth::read_current_auth().unwrap().unwrap();
+    assert_eq!(auth.tokens.unwrap().refresh_token, "renewed-held-refresh");
+    let mut reconciled = store.clone();
+    assert!(!crate::auth::sync_active_account_tokens(
+        &mut reconciled,
+        &crate::auth::read_current_auth().unwrap().unwrap()
+    ));
+    let AuthData::ChatGPT { refresh_token, .. } = &store.accounts[1].auth_data else {
+        panic!("expected ChatGPT account");
+    };
+    assert_eq!(refresh_token, "renewed-held-refresh");
+}

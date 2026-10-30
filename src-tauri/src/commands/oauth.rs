@@ -6,7 +6,8 @@ use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
 use crate::auth::{
-    add_account, load_accounts, save_accounts, switch_to_account, AUTH_OPERATION_LOCK,
+    add_account, codex_holds_account, codex_uses_account, load_accounts, load_store_reconciled,
+    save_accounts, switch_to_account, AUTH_OPERATION_LOCK,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountInfo, AuthData, OAuthLoginInfo, StoredAccount,
@@ -38,7 +39,9 @@ pub async fn start_login(
         if !matches!(account.auth_data, AuthData::ChatGPT { .. }) {
             return Err("Only ChatGPT accounts support re-login".into());
         }
-        if store.active_account_id.as_ref() == Some(id) {
+        // Codex holds the account only while auth.json does too; a stale
+        // active id must not demand closing Codex.
+        if codex_holds_account(id).map_err(|e| e.to_string())? {
             ensure_active_relogin_safe()?;
         }
     }
@@ -87,7 +90,10 @@ fn validate_relogin_identity(old: &StoredAccount, new: &StoredAccount) -> Result
     let new_workspace = new_claims.account_id.as_ref().or(new_id.as_ref());
     let same_user = match (old_claims.subject.as_deref(), new_claims.subject.as_deref()) {
         (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a == b,
-        _ => match (old.email.as_deref(), new.email.as_deref()) {
+        _ => match (
+            old_claims.email.as_deref().or(old.email.as_deref()),
+            new.email.as_deref(),
+        ) {
             (Some(a), Some(b)) if !a.trim().is_empty() && !b.trim().is_empty() => {
                 a.eq_ignore_ascii_case(b)
             }
@@ -110,13 +116,19 @@ fn save_relogin_with_check(
     new: StoredAccount,
     check_active: impl FnOnce() -> Result<(), String>,
 ) -> Result<StoredAccount, String> {
-    let mut store = load_accounts().map_err(|e| e.to_string())?;
-    let active = store.active_account_id.as_deref() == Some(id);
-    let account = store
+    // Decide from the store reconciled against Codex's live login, as a refresh
+    // does. Only an account Codex really holds is written to auth.json, so a
+    // stale active id cannot overwrite a login made outside the switcher. And an
+    // account that auth.json holds is adopted first, so the next sync cannot
+    // replace the renewed tokens with stale live ones.
+    let (mut store, live_auth) = load_store_reconciled().map_err(|e| e.to_string())?;
+    let index = store
         .accounts
-        .iter_mut()
-        .find(|a| a.id == id)
+        .iter()
+        .position(|a| a.id == id)
         .ok_or("Account no longer exists")?;
+    let active = codex_uses_account(&store, &store.accounts[index], live_auth.as_ref());
+    let account = &mut store.accounts[index];
     validate_relogin_identity(account, &new)?;
     if active {
         check_active()?;

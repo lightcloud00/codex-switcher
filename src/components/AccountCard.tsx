@@ -3,7 +3,7 @@ import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, A
 import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
-import { needsRelogin } from "../lib/accountAuth";
+import { describeAuthFailure } from "../lib/accountAuth";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -219,6 +219,8 @@ export function AccountCard({
     account.auth_mode === "chat_g_p_t" && account.plan_type?.toLowerCase() !== "free";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
   const compactResetCredits = !account.is_active;
+  const authFailure =
+    account.auth_mode === "chat_g_p_t" ? describeAuthFailure(account.usage?.error) : null;
 
   const loadResetCredits = useCallback(async () => {
     const requestId = ++resetRequestSeq.current;
@@ -353,13 +355,20 @@ export function AccountCard({
       </div>
 
       {/* Usage */}
-      <div className="mb-3">
-        <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
+      <div className="mb-3 empty:hidden">
+        <UsageBar
+          usage={account.usage}
+          loading={isRefreshing || account.usageLoading}
+          hideError={!!authFailure}
+        />
       </div>
 
-      {account.auth_mode === "chat_g_p_t" && needsRelogin(account.usage?.error) && (
+      {authFailure && (
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-          <span>Your login needs renewing.</span>
+          <span>
+            {authFailure.message}
+            {account.is_active && " Close Codex first."}
+          </span>
           <button
             onClick={onRelogin}
             disabled={switching || switchDisabled}
