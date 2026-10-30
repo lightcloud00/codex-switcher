@@ -184,6 +184,35 @@ export interface ClaudeSeatRegistryEntry {
   id: string;
   host: string | null;
   plan: string | null;
+  /** The account name claude-usage reports this seat under; the primary key of the usage join. */
+  usage_account: string | null;
+}
+
+// One limit window of a seat, from the local Prometheus (get_claude_prometheus, claude_seat_* series).
+export interface ClaudePromWindow {
+  /** Set only while the exporter vouches for the reading (known); null otherwise. */
+  used_pct: number | null;
+  resets_at: string | null;
+  /** Age of the reading when Prometheus was queried. */
+  age_s: number | null;
+  known: boolean;
+}
+
+export interface ClaudePromSeat {
+  /** Seat-health state whose series is 1: "ok", "broken", "held", "failed", "at_limit", "slow". */
+  state: string | null;
+  usable: boolean | null;
+  /** The seat's fleet-summon lock outlived its owner; an operator has to release it. */
+  lock_orphaned: boolean;
+  windows: Record<"5h" | "7d", ClaudePromWindow>;
+}
+
+/** The get_claude_prometheus payload. Never an error: an unreachable Prometheus is found = false. */
+export interface ClaudePromSnapshot {
+  found: boolean;
+  error?: string | null;
+  queried_at: string;
+  seats: Record<string, ClaudePromSeat>;
 }
 
 export interface ClaudeSeatRegistry {
@@ -211,4 +240,12 @@ export interface ClaudeSeat {
   /** Shell command that starts Claude on this seat; null when none is known. */
   launcher: string | null;
   inRegistry: boolean;
+  /** Seat-health state from Prometheus ("broken", "held", ...); null when Prometheus has none. */
+  promState: string | null;
+  /** The seat's fleet-summon lock is orphaned (Prometheus claude_seat_lock_orphaned). */
+  lockOrphaned: boolean;
+  /** Seconds since the newest reading of either window, from usage or Prometheus; null when none. */
+  lastReadAgeS: number | null;
+  /** Why an "unknown" seat has no numbers; null for every other status. */
+  unknownReason: string | null;
 }
