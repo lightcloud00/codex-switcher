@@ -73,6 +73,17 @@ test("Grok shows the hand reading with its age and flags it stale after a day", 
   assert.equal(stale.renews, "Ends 2026-11-23 (renewal off)");
 });
 
+test("a Grok row with a known account shows the email and moves the bot name to the detail line", () => {
+  const [known, unknown] = buildGrokRows(
+    [grok({ id: "grok-windows", computer: "Windows main", bot: "Kiwi", account: "kiwi@example.com" }), grok({})],
+    NOW,
+  );
+  assert.equal(known.account, "kiwi@example.com");
+  assert.match(known.detail ?? "", /^Kiwi · Windows main/);
+  assert.equal(unknown.account, "Grok Bot");
+  assert.match(unknown.detail ?? "", /^Mac/);
+});
+
 test("Grok without a reading never invents a percent; unreachable and signed-out computers say so", () => {
   const [none, down, out] = buildGrokRows(
     [
