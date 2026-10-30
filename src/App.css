@@ -9,3 +9,8 @@
 :root.dark {
   color-scheme: dark;
 }
+
+/* WebKit draws today's date in an empty date field; hide it so an unset date does not read as set. */
+input[type="date"][data-empty]:not(:focus)::-webkit-datetime-edit {
+  color: transparent;
+}
