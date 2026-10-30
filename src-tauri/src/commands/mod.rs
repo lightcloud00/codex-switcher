@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod account_stats;
+pub mod claude_prom;
 pub mod claude_usage;
 pub mod oauth;
 pub mod process;
@@ -10,6 +11,7 @@ pub mod window;
 
 pub use account::*;
 pub use account_stats::*;
+pub use claude_prom::*;
 pub use claude_usage::*;
 pub use oauth::*;
 pub use process::*;
