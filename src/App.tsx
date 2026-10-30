@@ -1,5 +1,7 @@
 import { ProviderAccessPanel } from "./components/ProviderAccessPanel";
 import { ApiCreditsPanel } from "./components/ApiCreditsPanel";
+import { OverviewPanel } from "./components/OverviewPanel";
+import { isCodexAccountInactive } from "./lib/overview";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
@@ -46,15 +48,40 @@ import {
 } from "./lib/autoWarmupPolicy";
 import "./App.css";
 
-type AppView = "codex" | "claude" | "providers";
+type AppView = "overview" | "codex" | "claude" | "providers";
+const APP_VIEWS: readonly AppView[] = ["overview", "codex", "claude", "providers"];
+const VIEW_LABELS: Record<AppView, string> = {
+  overview: "Overview",
+  codex: "Codex",
+  claude: "Claude",
+  providers: "Providers",
+};
 const VIEW_STORAGE_KEY = "codex-switcher.view";
+const INACTIVE_OPEN_STORAGE_KEY = "codex-switcher.inactive-accounts-open";
 
+// Overview is the default until a tab has been chosen; a stored choice still wins.
 function readStoredView(): AppView {
   try {
     const value = localStorage.getItem(VIEW_STORAGE_KEY);
-    return value === "claude" || value === "providers" ? value : "codex";
+    return APP_VIEWS.find((view) => view === value) ?? "overview";
   } catch {
-    return "codex";
+    return "overview";
+  }
+}
+
+function readStoredInactiveOpen(): boolean {
+  try {
+    return localStorage.getItem(INACTIVE_OPEN_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function storeInactiveOpen(open: boolean) {
+  try {
+    localStorage.setItem(INACTIVE_OPEN_STORAGE_KEY, open ? "1" : "0");
+  } catch {
+    // Storage can be unavailable (private mode); the disclosure just won't persist.
   }
 }
 
@@ -224,6 +251,14 @@ function App() {
   const selectView = useCallback((next: AppView) => {
     setView(next);
     storeView(next);
+  }, []);
+  const [inactiveOpen, setInactiveOpen] = useState(readStoredInactiveOpen);
+  const toggleInactiveOpen = useCallback(() => {
+    setInactiveOpen((prev) => {
+      const next = !prev;
+      storeInactiveOpen(next);
+      return next;
+    });
   }, []);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
@@ -1361,17 +1396,70 @@ function App() {
   const hasMatchingActiveAccount =
     activeAccount !== undefined &&
     matchesAccountSearch(activeAccount, normalizedAccountSearchQuery);
+  // Accounts whose subscription has run out sit behind "Inactive accounts", in the same sort order.
+  const { liveOtherAccounts, inactiveAccounts } = useMemo(() => {
+    const nowMs = Date.now();
+    return {
+      liveOtherAccounts: sortedOtherAccounts.filter((a) => !isCodexAccountInactive(a, nowMs)),
+      inactiveAccounts: sortedOtherAccounts.filter((a) => isCodexAccountInactive(a, nowMs)),
+    };
+  }, [sortedOtherAccounts]);
   const visibleOtherAccounts = useMemo(
     () =>
-      sortedOtherAccounts.filter((account) =>
+      liveOtherAccounts.filter((account) =>
         matchesAccountSearch(account, normalizedAccountSearchQuery)
       ),
-    [normalizedAccountSearchQuery, sortedOtherAccounts]
+    [normalizedAccountSearchQuery, liveOtherAccounts]
   );
+  const visibleInactiveAccounts = useMemo(
+    () =>
+      inactiveAccounts.filter((account) =>
+        matchesAccountSearch(account, normalizedAccountSearchQuery)
+      ),
+    [normalizedAccountSearchQuery, inactiveAccounts]
+  );
+  // A search shows its matches among the inactive accounts too, whatever the stored open state.
+  const inactiveShown = inactiveOpen || normalizedAccountSearchQuery.length > 0;
   const hasNoMatchingAccounts =
     normalizedAccountSearchQuery.length > 0 &&
     !hasMatchingActiveAccount &&
-    visibleOtherAccounts.length === 0;
+    visibleOtherAccounts.length === 0 &&
+    visibleInactiveAccounts.length === 0;
+
+  const renderOtherAccountCard = (account: AccountWithUsage) => (
+    <AccountCard
+      key={account.id}
+      account={account}
+      onRelogin={() => setReloginAccount(account)}
+      onSwitch={() => handleSwitch(account.id)}
+      onWarmup={() => handleWarmupAccount(account.id, account.name)}
+      onDelete={() => handleDelete(account.id)}
+      onRefresh={() =>
+        refreshSingleUsage(account.id, { refreshMetadata: true })
+      }
+      onRename={(newName) => renameAccount(account.id, newName)}
+      switching={switchingId === account.id}
+      switchDisabled={switchingId !== null || isForceClosingCodex}
+      codexRunning={hasRunningProcesses ?? false}
+      warmingUp={
+        isWarmingAll ||
+        warmingUpId === account.id ||
+        autoWarmupRunningIds.has(account.id)
+      }
+      masked={maskedAccounts.has(account.id)}
+      onToggleMask={() => toggleMask(account.id)}
+      autoWarmupEnabled={
+        autoWarmupAllEnabled || autoWarmupAccountIds.has(account.id)
+      }
+      autoWarmupManagedByAll={autoWarmupAllEnabled}
+      autoWarmupLabel={getAutoWarmupLabel(
+        account.usage,
+        autoWarmupAllEnabled || autoWarmupAccountIds.has(account.id),
+        autoWarmupRunningIds.has(account.id)
+      )}
+      onToggleAutoWarmup={() => toggleAutoWarmupAccount(account.id)}
+    />
+  );
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -1441,7 +1529,7 @@ function App() {
                     aria-label="Choose view"
                     className="inline-flex rounded-lg border border-gray-200 p-0.5 text-xs dark:border-gray-700"
                   >
-                    {(["codex", "claude", "providers"] as const).map((v) => (
+                    {APP_VIEWS.map((v) => (
                       <button
                         key={v}
                         role="tab"
@@ -1452,7 +1540,7 @@ function App() {
                             : "text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
                           }`}
                       >
-                        {v === "codex" ? "Codex" : v === "claude" ? "Claude" : "Providers"}
+                        {VIEW_LABELS[v]}
                       </button>
                     ))}
                   </div>
@@ -1774,10 +1862,18 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
-        {view === "providers" ? (
+        {view === "overview" ? (
+          <OverviewPanel
+            accounts={accounts}
+            accountsLoading={loading && accounts.length === 0}
+            accountsError={error}
+            masked={allMasked}
+            maskedAccountIds={maskedAccounts}
+          />
+        ) : view === "providers" ? (
           <div className="space-y-8">
-            <ProviderAccessPanel />
             <ApiCreditsPanel />
+            <ProviderAccessPanel />
           </div>
         ) : view === "claude" ? (
           <ClaudeUsagePanel masked={allMasked} />
@@ -1918,8 +2014,8 @@ function App() {
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Other Accounts ({
                       normalizedAccountSearchQuery
-                        ? `${visibleOtherAccounts.length} of ${otherAccounts.length}`
-                        : otherAccounts.length
+                        ? `${visibleOtherAccounts.length} of ${liveOtherAccounts.length}`
+                        : liveOtherAccounts.length
                     })
                   </h2>
                   <div className="flex items-center gap-2">
@@ -1973,41 +2069,43 @@ function App() {
                   </div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {visibleOtherAccounts.map((account) => (
-                    <AccountCard
-                      key={account.id}
-                      account={account}
-                      onRelogin={() => setReloginAccount(account)}
-                      onSwitch={() => handleSwitch(account.id)}
-                      onWarmup={() => handleWarmupAccount(account.id, account.name)}
-                      onDelete={() => handleDelete(account.id)}
-                      onRefresh={() =>
-                        refreshSingleUsage(account.id, { refreshMetadata: true })
-                      }
-                      onRename={(newName) => renameAccount(account.id, newName)}
-                      switching={switchingId === account.id}
-                      switchDisabled={switchingId !== null || isForceClosingCodex}
-                      codexRunning={hasRunningProcesses ?? false}
-                      warmingUp={
-                        isWarmingAll ||
-                        warmingUpId === account.id ||
-                        autoWarmupRunningIds.has(account.id)
-                      }
-                      masked={maskedAccounts.has(account.id)}
-                      onToggleMask={() => toggleMask(account.id)}
-                      autoWarmupEnabled={
-                        autoWarmupAllEnabled || autoWarmupAccountIds.has(account.id)
-                      }
-                      autoWarmupManagedByAll={autoWarmupAllEnabled}
-                      autoWarmupLabel={getAutoWarmupLabel(
-                        account.usage,
-                        autoWarmupAllEnabled || autoWarmupAccountIds.has(account.id),
-                        autoWarmupRunningIds.has(account.id)
-                      )}
-                      onToggleAutoWarmup={() => toggleAutoWarmupAccount(account.id)}
-                    />
-                  ))}
+                  {visibleOtherAccounts.map(renderOtherAccountCard)}
                 </div>
+              </section>
+            )}
+
+            {/* Inactive Accounts: expired subscriptions, kept (nothing is deleted) but out of the way */}
+            {visibleInactiveAccounts.length > 0 && (
+              <section>
+                <button
+                  type="button"
+                  onClick={toggleInactiveOpen}
+                  disabled={normalizedAccountSearchQuery.length > 0}
+                  aria-expanded={inactiveShown}
+                  aria-controls="inactive-accounts"
+                  className="mb-4 flex items-center gap-2 text-sm font-medium uppercase tracking-wider text-gray-500 transition-colors hover:text-gray-900 disabled:cursor-default disabled:hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-100 dark:disabled:hover:text-gray-400"
+                >
+                  <svg
+                    className={`h-4 w-4 transition-transform ${inactiveShown ? "rotate-90" : ""}`}
+                    viewBox="0 0 20 20"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    aria-hidden="true"
+                  >
+                    <path d="M8 6l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  {`Inactive accounts (${
+                    normalizedAccountSearchQuery
+                      ? `${visibleInactiveAccounts.length} of ${inactiveAccounts.length}`
+                      : inactiveAccounts.length
+                  })`}
+                </button>
+                {inactiveShown && (
+                  <div id="inactive-accounts" className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {visibleInactiveAccounts.map(renderOtherAccountCard)}
+                  </div>
+                )}
               </section>
             )}
           </div>

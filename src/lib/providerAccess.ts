@@ -9,6 +9,9 @@ export const PLAN_LABELS: Record<string, string> = {
   "anthropic-api": "Anthropic API credits",
   "deepseek-api": "DeepSeek API credits",
   "fireworks-api": "Fireworks AI credits",
+  "kimi-api": "Kimi (Moonshot) API credits",
+  "openrouter-api": "OpenRouter credits",
+  "treg-api": "treg credits",
   "claude-mac-gustavo": "Claude · Gustavo", "claude-mac-main": "Claude · Main",
   "claude-mac-096": "Claude · 096", "claude-windows": "Claude · Windows", "claude-wsl": "Claude · WSL",
 };

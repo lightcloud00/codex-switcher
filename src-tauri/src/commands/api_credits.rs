@@ -4,7 +4,7 @@ use super::provider_access::find_binary;
 
 const SCHEMA: &str = "aos.api-credit-probe.v1";
 const UNEXPECTED: &str = "API credit check returned an unexpected result";
-/// The probe reads two providers one after the other (25 s each), so this leaves a small margin.
+/// The probe reads its providers in parallel, each capped at 25 s, so this leaves a margin.
 const PROBE_TIMEOUT_SECS: u64 = 60;
 
 /// Takes the last stdout line that starts with `{` and accepts it only with the expected schema and a
@@ -26,7 +26,12 @@ pub fn parse_probe_output(stdout: &str) -> Result<serde_json::Value, String> {
 /// Fixed argv from the caller, no stdin, stderr dropped, stdout capped. Timeout is its own message; a spawn or
 /// read failure is the generic one. The exit status is ignored: the schema check decides validity.
 #[cfg(not(windows))]
-async fn run_probe(binary: std::path::PathBuf, args: &[&str], secs: u64) -> Result<String, String> {
+pub(super) async fn run_probe(
+    binary: std::path::PathBuf,
+    args: &[&str],
+    secs: u64,
+    what: &str,
+) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     const STDOUT_CAP: u64 = 256 * 1024;
     let path = format!(
@@ -54,25 +59,26 @@ async fn run_probe(binary: std::path::PathBuf, args: &[&str], secs: u64) -> Resu
         Some(String::from_utf8_lossy(&buf).into_owned())
     };
     match tokio::time::timeout(std::time::Duration::from_secs(secs), run).await {
-        Err(_) => Err("API credit check timed out".into()),
+        Err(_) => Err(format!("{what} timed out")),
         Ok(None) => Err(UNEXPECTED.into()),
         Ok(Some(stdout)) => Ok(stdout),
     }
 }
 #[cfg(windows)]
-async fn run_probe(
+pub(super) async fn run_probe(
     _binary: std::path::PathBuf,
     _args: &[&str],
     _secs: u64,
+    what: &str,
 ) -> Result<String, String> {
-    Err("API credit check is not available on Windows".into())
+    Err(format!("{what} is not available on Windows"))
 }
 
 #[tauri::command]
 pub async fn get_api_credits() -> Result<serde_json::Value, String> {
     let binary = find_binary("api-credit-probe")
         .ok_or("api-credit-probe is not installed on this computer")?;
-    parse_probe_output(&run_probe(binary, &[], PROBE_TIMEOUT_SECS).await?)
+    parse_probe_output(&run_probe(binary, &[], PROBE_TIMEOUT_SECS, "API credit check").await?)
 }
 
 #[cfg(test)]
@@ -117,13 +123,13 @@ mod tests {
     #[cfg(not(windows))]
     #[tokio::test]
     async fn run_probe_returns_stdout_and_reports_a_timeout() {
-        let out = run_probe("/bin/echo".into(), &["hello"], 10).await;
+        let out = run_probe("/bin/echo".into(), &["hello"], 10, "API credit check").await;
         assert_eq!(out.unwrap(), "hello\n");
         let started = std::time::Instant::now();
-        let hung = run_probe("/bin/sh".into(), &["-c", "exec sleep 30"], 1).await;
+        let hung = run_probe("/bin/sh".into(), &["-c", "exec sleep 30"], 1, "API credit check").await;
         assert_eq!(hung.unwrap_err(), "API credit check timed out");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        let missing = run_probe("/no/such/binary".into(), &[], 10).await;
+        let missing = run_probe("/no/such/binary".into(), &[], 10, "API credit check").await;
         assert_eq!(missing.unwrap_err(), UNEXPECTED);
     }
 }

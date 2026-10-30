@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime, openExternalUrl } from "../lib/platform";
+import { planDatesText } from "../lib/overview";
 import { dateChanged, hasUnsavedDates, mergeRefresh, pendingDateLabel, PLAN_LABELS, signInLabel, type PlanDates, type PlanView, type SignIn } from "../lib/providerAccess";
 interface Provider { id: string; label: string; installed: boolean; signedIn: SignIn; signInDetail: string; signInCheckedAt: string | null }
 interface Access { checkedAt: string; providers: Provider[]; plans: PlanDates[] }
@@ -42,6 +43,8 @@ export function ProviderAccessPanel() {
   async function save() { if (!data) return; const plans = data.plans; setBusy(true); setError(""); try { await invokeBackend("save_provider_dates", {plans}); setView(old => ({ ...old, saved: copyPlans(plans) })); setMessage("Dates saved on this computer."); } catch(e) { setError(String(e)); } finally { setBusy(false); } }
   async function launch(id: string) { setError(""); try { await invokeBackend("launch_provider", {provider: id}); setMessage(id === "credvault" ? "CredVault status check completed." : "Opened provider. Tool access depends on its active client and permissions."); } catch(e) { setError(String(e)); } }
   const unsavedDates = !!data && hasUnsavedDates(data.plans, saved);
+  // One line per plan that has any date set, shown while the editor is closed.
+  const dateSummaries = (data?.plans ?? []).map(p => ({ id: p.id, text: planDatesText(p) })).filter(s => s.text);
   return <section aria-label="Provider access" className="space-y-5">
     <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} disabled={busy || checking} className="rounded-lg border px-3 py-2 text-sm">{busy ? "Refreshing…" : checking ? "Checking sign-in…" : "Refresh local status"}</button></div>
     {error && <p role="alert" className="text-red-600 dark:text-red-300">{error}</p>}
@@ -54,7 +57,10 @@ export function ProviderAccessPanel() {
       {p.id !== "credvault" && <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void openExternalUrl(DETAILS[p.id].url)}>Account</button>}
       <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void navigator.clipboard.writeText(DETAILS[p.id].command).then(() => setMessage("CLI command copied.")).catch(() => setError("Clipboard unavailable"))}>Copy CLI</button></div>
     </article>)}</div>
-    <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-4"><h3 className="font-semibold">Renewal & expiry</h3>
+    <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-3"><h3 className="font-semibold">Renewal & expiry</h3>
+      {dateSummaries.length ? <ul className="space-y-1 text-sm">{dateSummaries.map(d => <li key={d.id}><span className="font-medium">{PLAN_LABELS[d.id] ?? d.id}</span> <span className="text-gray-500">· {d.text}</span></li>)}</ul> : <p className="text-sm text-gray-500">No plan dates set.</p>}
+      <details><summary className="cursor-pointer text-sm font-medium">Edit plan dates{unsavedDates && <span className="ml-2 text-amber-700 dark:text-amber-300">Unsaved changes</span>}</summary>
+      <div className="mt-3 space-y-4">
       <p className="text-sm text-gray-500">Enter dates confirmed in the account. Weekly allowance resets are shown in the Claude tab; a reset does not renew billing. Unknown stays unknown. Dates save locally. Arrow keys on an empty date field fill today; press Clear if unintended.</p>
       {data?.plans.map(p => <fieldset key={p.id} className="border-t border-gray-200 pt-3 dark:border-gray-700"><legend className="pr-2 text-sm font-medium">{PLAN_LABELS[p.id] ?? p.id}</legend><div className="grid gap-3 sm:grid-cols-3">
         {([["billingRenewsOn", "Billing renewal"], ["creditExpiresOn", "Credit expiry"], ["credentialExpiresOn", "Credential expiry"]] as const).map(([key, label]) => {
@@ -67,6 +73,7 @@ export function ProviderAccessPanel() {
           </div>;
         })}
       </div></fieldset>)}<div className="flex items-center gap-3"><button disabled={busy || !data || !unsavedDates} onClick={() => void save()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Save dates</button>{unsavedDates && <span className="text-sm text-amber-700 dark:text-amber-300">Unsaved changes</span>}</div>
+      </div></details>
     </div>
     {data && <p className="text-xs text-gray-500">Local check: {new Date(data.checkedAt).toLocaleString()}. CLI discovery does not prove model, shell, MCP or file access.</p>}
   </section>;
