@@ -117,21 +117,183 @@ fn find_binary(name: &str) -> Option<PathBuf> {
         .flat_map(|p| names.iter().map(move |n| p.join(n)))
         .find(|p| p.is_file())
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignIn {
+    Yes,
+    No,
+    Unknown,
+}
+impl SignIn {
+    fn as_str(self) -> &'static str {
+        match self {
+            SignIn::Yes => "yes",
+            SignIn::No => "no",
+            SignIn::Unknown => "unknown",
+        }
+    }
+}
+const NOT_CHECKED: &str = "not checked";
+const CHECK_FAILED: &str = "check failed";
+/// Read-only status probe: fixed argv, no stdin, stderr dropped, stdout capped and handed only
+/// to the caller's parser (never logged or returned). Timeout, spawn failure or a read error is None.
+#[cfg(not(windows))]
+async fn probe(binary: PathBuf, args: &[&str], secs: u64) -> Option<(bool, String)> {
+    use tokio::io::AsyncReadExt;
+    const STDOUT_CAP: u64 = 64 * 1024;
+    let path = format!(
+        "/opt/homebrew/bin:/usr/local/bin:{}",
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args(args)
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let run = async move {
+        let mut child = cmd.spawn().ok()?;
+        let mut out = child.stdout.take()?;
+        let mut buf = Vec::new();
+        (&mut out)
+            .take(STDOUT_CAP)
+            .read_to_end(&mut buf)
+            .await
+            .ok()?;
+        // Closing the pipe lets a chatty child exit on SIGPIPE instead of blocking on a full buffer.
+        drop(out);
+        let status = child.wait().await.ok()?;
+        Some((status.success(), String::from_utf8_lossy(&buf).into_owned()))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(secs), run)
+        .await
+        .ok()
+        .flatten()
+}
+#[cfg(windows)]
+async fn probe(_binary: PathBuf, _args: &[&str], _secs: u64) -> Option<(bool, String)> {
+    None
+}
+/// `grok models` doubles as the sign-in probe; only the positive line counts.
+fn parse_grok(stdout: &str) -> SignIn {
+    if stdout
+        .lines()
+        .any(|l| l.starts_with("You are logged in with"))
+    {
+        SignIn::Yes
+    } else {
+        SignIn::Unknown
+    }
+}
+/// Reads only `isAuthenticated`; `userInfo` (email, user id) is never deserialised.
+fn parse_cursor(stdout: &str) -> SignIn {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Status {
+        is_authenticated: Option<bool>,
+    }
+    match serde_json::from_str::<Status>(stdout.trim()) {
+        Ok(Status {
+            is_authenticated: Some(true),
+        }) => SignIn::Yes,
+        Ok(Status {
+            is_authenticated: Some(false),
+        }) => SignIn::No,
+        _ => SignIn::Unknown,
+    }
+}
+fn parse_credvault(exit_ok: bool, stdout: &str) -> SignIn {
+    if exit_ok
+        && stdout
+            .lines()
+            .any(|l| l.starts_with("Vault state: UNLOCKED"))
+    {
+        SignIn::Yes
+    } else {
+        SignIn::Unknown
+    }
+}
+/// Maps a finished probe to a sign-in state and a fixed detail. A nonzero exit or any output the
+/// parsers do not recognise stays unknown: logged-out output was never observed, so never "no".
+fn classify(id: &str, exit_ok: bool, stdout: &str) -> (SignIn, &'static str) {
+    match (id, exit_ok) {
+        ("grok", true) => match parse_grok(stdout) {
+            SignIn::Yes => (SignIn::Yes, "grok models: logged in"),
+            _ => (SignIn::Unknown, CHECK_FAILED),
+        },
+        ("cursor", true) => match parse_cursor(stdout) {
+            SignIn::Yes => (SignIn::Yes, "cursor-agent status: authenticated"),
+            SignIn::No => (SignIn::No, "cursor-agent status: not authenticated"),
+            SignIn::Unknown => (SignIn::Unknown, CHECK_FAILED),
+        },
+        ("credvault", _) => match parse_credvault(exit_ok, stdout) {
+            SignIn::Yes => (SignIn::Yes, "credvault status: unlocked"),
+            _ => (SignIn::Unknown, CHECK_FAILED),
+        },
+        _ => (SignIn::Unknown, CHECK_FAILED),
+    }
+}
+struct SignInCheck {
+    state: SignIn,
+    detail: &'static str,
+    checked_at: Option<String>,
+}
+/// Runs the provider's fixed status command when `enabled`. Cursor resolves only `cursor-agent`,
+/// never the `agent` or `cursor` fallbacks, so Grok's `agent` binary is never mistaken for it.
+async fn check_sign_in(id: &str, enabled: bool) -> SignInCheck {
+    let unchecked = SignInCheck {
+        state: SignIn::Unknown,
+        detail: NOT_CHECKED,
+        checked_at: None,
+    };
+    let (bin, args): (&str, &[&str]) = match id {
+        "grok" => ("grok", &["models"]),
+        "cursor" => ("cursor-agent", &["status", "--format", "json"]),
+        "credvault" => ("credvault", &["status"]),
+        _ => return unchecked,
+    };
+    let Some(binary) = enabled.then(|| find_binary(bin)).flatten() else {
+        return unchecked;
+    };
+    let (state, detail) = match probe(binary, args, 10).await {
+        Some((exit_ok, stdout)) => classify(id, exit_ok, &stdout),
+        None => (SignIn::Unknown, CHECK_FAILED),
+    };
+    SignInCheck {
+        state,
+        detail,
+        checked_at: Some(Utc::now().to_rfc3339()),
+    }
+}
 #[tauri::command]
 pub async fn get_provider_access() -> Result<serde_json::Value, String> {
-    let providers = [
-        ("grok", "Grok", vec!["grok"]),
-        ("cursor", "Cursor", vec!["cursor-agent", "agent", "cursor"]),
-        ("credvault", "CredVault", vec!["credvault", "credvault-mac"]),
-    ]
-    .into_iter()
-    .map(|(id, label, bins)| {
-        serde_json::json!({
-            "id": id, "label": label, "installed": bins.iter().any(|b| find_binary(b).is_some()),
-            "authentication": "Native sign-in / broker; not checked by Switcher",
+    provider_access_snapshot(true).await
+}
+/// `probe` false runs no CLI at all (the LAN web route), so sign-in stays "unknown" there.
+pub async fn provider_access_snapshot(probe: bool) -> Result<serde_json::Value, String> {
+    let defs: [(&str, &str, &[&str]); 3] = [
+        ("grok", "Grok", &["grok"]),
+        ("cursor", "Cursor", &["cursor-agent", "cursor"]),
+        ("credvault", "CredVault", &["credvault", "credvault-mac"]),
+    ];
+    let installed = defs.map(|(_, _, bins)| bins.iter().any(|b| find_binary(b).is_some()));
+    let (grok, cursor, credvault) = tokio::join!(
+        check_sign_in("grok", probe && installed[0]),
+        check_sign_in("cursor", probe && installed[1]),
+        check_sign_in("credvault", probe && installed[2]),
+    );
+    let providers = defs
+        .iter()
+        .zip(installed)
+        .zip([grok, cursor, credvault])
+        .map(|(((id, label, _), installed), check)| {
+            serde_json::json!({
+                "id": id, "label": label, "installed": installed,
+                "signedIn": check.state.as_str(), "signInDetail": check.detail,
+                "signInCheckedAt": check.checked_at,
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     Ok(
         serde_json::json!({"checkedAt": Utc::now().to_rfc3339(), "providers": providers, "plans": read_dates()?}),
     )
@@ -279,5 +441,103 @@ mod tests {
     #[tokio::test]
     async fn launcher_rejects_renderer_command() {
         assert!(launch_provider("grok; whoami".into()).await.is_err());
+    }
+    const GROK_OUT: &str = "You are logged in with grok.com.\n\nDefault model: grok-4.7";
+    const CURSOR_OUT: &str = r#"{"status":"authenticated","isAuthenticated":true,"userInfo":{"email":"a@b.c","userId":7}}"#;
+    const CREDVAULT_OUT: &str = "Vault file: exists\nPassword protected: NO\nVault state: UNLOCKED (no password required)\nCredentials stored: 730";
+    #[test]
+    fn grok_is_signed_in_only_on_the_logged_in_line() {
+        assert_eq!(parse_grok(GROK_OUT), SignIn::Yes);
+        assert_eq!(parse_grok(""), SignIn::Unknown);
+        assert_eq!(parse_grok("Default model: grok-4.7"), SignIn::Unknown);
+        assert_eq!(parse_grok("Error: You are logged in with"), SignIn::Unknown);
+    }
+    #[test]
+    fn cursor_reads_only_is_authenticated() {
+        assert_eq!(parse_cursor(CURSOR_OUT), SignIn::Yes);
+        assert_eq!(parse_cursor("{\"isAuthenticated\":false}\n"), SignIn::No);
+        assert_eq!(parse_cursor("garbage"), SignIn::Unknown);
+        assert_eq!(parse_cursor(""), SignIn::Unknown);
+        assert_eq!(
+            parse_cursor(r#"{"status":"authenticated"}"#),
+            SignIn::Unknown
+        );
+        assert_eq!(
+            parse_cursor(r#"{"isAuthenticated":"true"}"#),
+            SignIn::Unknown
+        );
+    }
+    #[test]
+    fn credvault_needs_exit_zero_and_unlocked_line() {
+        assert_eq!(parse_credvault(true, CREDVAULT_OUT), SignIn::Yes);
+        assert_eq!(parse_credvault(false, CREDVAULT_OUT), SignIn::Unknown);
+        assert_eq!(
+            parse_credvault(true, "Vault state: LOCKED"),
+            SignIn::Unknown
+        );
+        assert_eq!(parse_credvault(true, ""), SignIn::Unknown);
+    }
+    #[test]
+    fn unobserved_output_is_unknown_never_no_and_detail_leaks_nothing() {
+        let cases = [
+            ("grok", true, GROK_OUT, SignIn::Yes),
+            ("grok", false, GROK_OUT, SignIn::Unknown),
+            ("grok", true, "", SignIn::Unknown),
+            ("cursor", true, CURSOR_OUT, SignIn::Yes),
+            ("cursor", true, r#"{"isAuthenticated":false}"#, SignIn::No),
+            (
+                "cursor",
+                false,
+                r#"{"isAuthenticated":false}"#,
+                SignIn::Unknown,
+            ),
+            ("cursor", true, "garbage", SignIn::Unknown),
+            ("credvault", true, CREDVAULT_OUT, SignIn::Yes),
+            ("credvault", false, CREDVAULT_OUT, SignIn::Unknown),
+            ("credvault", true, "Vault state: LOCKED", SignIn::Unknown),
+            ("other", true, GROK_OUT, SignIn::Unknown),
+        ];
+        for (id, exit_ok, out, want) in cases {
+            let (state, detail) = classify(id, exit_ok, out);
+            assert_eq!(state, want, "{id} {exit_ok} {out:?}");
+            assert!(!detail.contains('@') && !detail.contains("a@b.c"));
+        }
+        // The Cursor fixture carries an email; none of it may reach the returned detail.
+        assert_eq!(
+            classify("cursor", true, CURSOR_OUT).1,
+            "cursor-agent status: authenticated"
+        );
+    }
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn probe_returns_exit_status_and_stdout() {
+        let ok = probe("/bin/echo".into(), &["hello"], 10).await;
+        assert_eq!(ok, Some((true, "hello\n".to_string())));
+        let failed = probe("/usr/bin/false".into(), &[], 10).await;
+        assert_eq!(failed, Some((false, String::new())));
+        assert_eq!(probe("/no/such/binary".into(), &[], 10).await, None);
+    }
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn probe_caps_stdout_and_ends_a_chatty_child() {
+        let (exit_ok, out) = probe("/usr/bin/yes".into(), &[], 10).await.unwrap();
+        assert!(!exit_ok);
+        assert_eq!(out.len(), 64 * 1024);
+    }
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn probe_times_out_a_hung_child() {
+        let started = std::time::Instant::now();
+        assert_eq!(probe("/bin/sleep".into(), &["30"], 1).await, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+    #[tokio::test]
+    async fn disabled_check_runs_no_cli_and_reports_unknown() {
+        for id in ["grok", "cursor", "credvault"] {
+            let check = check_sign_in(id, false).await;
+            assert_eq!(check.state, SignIn::Unknown);
+            assert_eq!(check.detail, NOT_CHECKED);
+            assert!(check.checked_at.is_none());
+        }
     }
 }

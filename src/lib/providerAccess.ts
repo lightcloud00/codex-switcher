@@ -20,3 +20,24 @@ export function dateStatus(value: string | null, now = new Date()): string {
   const days = Math.round((date.getTime() - today.getTime()) / 86400000);
   return days < 0 ? "Date passed · verify" : days === 0 ? "Due today · verify" : days === 1 ? "Due tomorrow" : days <= 7 ? `Due in ${days} days` : date.toLocaleDateString();
 }
+export type SignIn = "yes" | "no" | "unknown";
+/** Only a positive CLI status reads as signed in; anything the backend could not observe stays unverified. */
+export function signInLabel(s: SignIn): string {
+  return s === "yes" ? "signed in" : s === "no" ? "not signed in" : "sign-in unverified";
+}
+export function dateChanged(value: string | null, saved: string | null): boolean {
+  return (value || null) !== (saved || null);
+}
+/** A date that differs from the saved file shows as unsaved, so a field filled by the OS never looks stored. */
+export function pendingDateLabel(value: string | null, saved: string | null, now = new Date()): string {
+  const status = dateStatus(value, now);
+  return dateChanged(value, saved) ? `Unsaved · ${status}` : status;
+}
+export function hasUnsavedDates(plans: PlanDates[], saved: PlanDates[]): boolean {
+  return plans.some(p => {
+    const s = saved.find(x => x.id === p.id);
+    return dateChanged(p.billingRenewsOn, s?.billingRenewsOn ?? null)
+      || dateChanged(p.creditExpiresOn, s?.creditExpiresOn ?? null)
+      || dateChanged(p.credentialExpiresOn, s?.credentialExpiresOn ?? null);
+  });
+}
