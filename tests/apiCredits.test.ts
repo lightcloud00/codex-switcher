@@ -10,6 +10,9 @@ test("another currency shows its code and a missing split is left out", () => {
   const balance = { currency: "CNY", total: "12.00", granted: "2.00", topped_up: "10.00" };
   assert.equal(balanceLine(row({ balance })), "CNY 12.00 left (granted CNY 2.00 + topped up CNY 10.00)");
   assert.equal(balanceLine(row({ balance: { currency: "USD", total: "5.00" } })), "$5.00 left");
+  // Kimi, OpenRouter and treg send numbers: two decimals, and an overdrawn account reads -$0.20.
+  assert.equal(balanceLine(row({ balance: { currency: "USD", total: 13.2837 } })), "$13.28 left");
+  assert.equal(balanceLine(row({ balance: { currency: "USD", total: -0.2, topped_up: 100 } })), "-$0.20 left (topped up $100.00)");
   assert.equal(balanceLine(row({ balance: { currency: "USD", total: "5.00", granted: "0.00", topped_up: null } })), "$5.00 left (granted $0.00)");
 });
 test("no balance falls back to the provider note, and a failed row shows nothing", () => {
@@ -31,7 +34,7 @@ test("each probe error maps to a short action label", () => {
   assert.equal(label("http_401"), "key rejected");
   assert.equal(label("http_403"), "key rejected");
   assert.equal(label("http_429"), "provider error 429");
-  assert.equal(label("http_500"), "provider error 500");
+  assert.equal(label("http_500"), "provider down (500)");
   assert.equal(label("URLError"), "check failed");
   assert.equal(label("http_"), "check failed");
 });

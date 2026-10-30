@@ -91,13 +91,14 @@ export function buildGrokRows(rows: GrokBotRow[], nowMs: number): OverviewRow[] 
       g.computer,
       g.app_version && `app v${g.app_version}`,
       g.cli_signed_in === false ? "Grok CLI signed out" : g.cli_signed_in ? "Grok CLI signed in" : null,
+      !g.plan && "plan not recorded",
     ].filter(Boolean);
     const status = g.error === "unreachable" ? "unreachable" : g.error ? "not checked" : g.signed_in ? "signed in" : "signed out";
     return {
       id: `grok:${g.id}`,
       account: g.bot,
       detail: detail.join(" · "),
-      type: g.plan ? `Grok ${g.plan}` : "Grok (plan not recorded)",
+      type: g.plan || "Grok",
       left,
       resets: "Weekly pool",
       renews: g.renews || NONE,

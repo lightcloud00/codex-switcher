@@ -122,7 +122,7 @@ function OverviewTableRow({ row, blur }: { row: OverviewRow; blur: boolean }) {
             <BlurredText blur={blur}>{row.account}</BlurredText>
           </div>
         ) : (
-          <div className={`text-xs italic ${sub}`}>email not set</div>
+          <div className={`text-xs italic ${sub}`}>email not given by provider</div>
         )}
         {row.detail && (
           <div className={`break-words text-xs ${sub}`}>
