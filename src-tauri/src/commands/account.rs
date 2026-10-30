@@ -76,10 +76,13 @@ fn load_accounts_matching_live_auth() -> Result<AccountsStore, String> {
         return load_accounts().map_err(|e| e.to_string());
     };
     let mut store = load_accounts().map_err(|e| e.to_string())?;
-    // An unreadable auth.json must not hide the account list.
+    // The repair is best-effort: neither an unreadable auth.json nor a failed
+    // save may hide the account list.
     if let Ok(Some(auth)) = read_current_auth() {
         if reconcile_active_account_with_live_auth(&mut store, &auth) {
-            save_accounts(&store).map_err(|e| e.to_string())?;
+            if let Err(err) = save_accounts(&store) {
+                println!("[Auth] Failed to save live-auth reconciliation: {err}");
+            }
         }
     }
     Ok(store)

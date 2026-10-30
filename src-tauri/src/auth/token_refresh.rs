@@ -135,11 +135,17 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     }
 
     // Re-read active state after the network request before touching auth.json.
+    // The refreshed tokens are already saved, so an unreadable auth.json only
+    // skips the write; it must not fail the refresh.
     let store = load_accounts()?;
-    if codex_uses_account(&store, &updated, read_current_auth()?.as_ref()) {
-        if let Err(err) = switch_to_account(&updated) {
-            println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
+    match read_current_auth() {
+        Ok(live_auth) if codex_uses_account(&store, &updated, live_auth.as_ref()) => {
+            if let Err(err) = switch_to_account(&updated) {
+                println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
+            }
         }
+        Ok(_) => {}
+        Err(err) => println!("[Auth] Skipped auth.json sync after token refresh: {err}"),
     }
 
     Ok(updated)
@@ -159,7 +165,13 @@ fn codex_uses_account(
 
 fn load_account_reconciling_live_auth(account_id: &str) -> Result<(StoredAccount, bool)> {
     let mut store = load_accounts()?;
-    let live_auth = read_current_auth()?;
+    // An unreadable auth.json (Codex mid-rewrite, a corrupt file) only blocks
+    // the active account, as before; other accounts refresh without it.
+    let live_auth = match read_current_auth() {
+        Ok(live_auth) => live_auth,
+        Err(err) if store.active_account_id.as_deref() == Some(account_id) => return Err(err),
+        Err(_) => None,
+    };
 
     if let Some(auth) = &live_auth {
         if reconcile_active_account_with_live_auth(&mut store, auth) {
@@ -349,7 +361,8 @@ mod tests {
     };
     use crate::auth::test_support::TestHome;
     use crate::auth::{
-        load_accounts, reconcile_active_account_with_live_auth, save_accounts, switch_to_account,
+        get_codex_auth_file, load_accounts, reconcile_active_account_with_live_auth, save_accounts,
+        switch_to_account,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -553,6 +566,28 @@ mod tests {
         let (_, signed_in_is_codex_owned) =
             load_account_reconciling_live_auth(&signed_in.id).unwrap();
         assert!(signed_in_is_codex_owned);
+    }
+
+    #[test]
+    fn unreadable_auth_json_blocks_only_the_active_account() {
+        let _home = TestHome::new();
+        let now = chrono::Utc::now().timestamp();
+        let active = chatgpt_account("Active", "workspace-a", now);
+        let inactive = chatgpt_account("Inactive", "workspace-b", now);
+        save_accounts(&AccountsStore {
+            accounts: vec![active.clone(), inactive.clone()],
+            active_account_id: Some(active.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+        let auth_path = get_codex_auth_file().unwrap();
+        std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+        std::fs::write(&auth_path, "{").unwrap();
+
+        assert!(load_account_reconciling_live_auth(&active.id).is_err());
+        let (_, inactive_is_codex_owned) =
+            load_account_reconciling_live_auth(&inactive.id).unwrap();
+        assert!(!inactive_is_codex_owned);
     }
 
     #[test]
