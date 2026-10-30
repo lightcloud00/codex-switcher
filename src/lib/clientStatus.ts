@@ -56,7 +56,7 @@ export function buildToolRows(tools: ClientToolRow[], activeCodexEmail?: string 
   return tools.map((t) => {
     const email = t.account?.trim() || (t.id.startsWith("codex") ? activeCodexEmail?.trim() : "") || "";
     const detail = [
-      t.version && `v${t.version}`,
+      t.version && (/^\d/.test(t.version) ? `v${t.version}` : t.version),
       t.model && `model ${t.model}`,
       email && t.account_type,
       t.note,
