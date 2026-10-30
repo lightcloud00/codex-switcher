@@ -450,10 +450,10 @@ test("seatTitle and seatSubtitle follow the email-or-id convention", () => {
   assert.equal(seatSubtitle({ id: "x", email: "  ", host: null }), "");
 });
 
-test("the default ~/.claude login is named as a login, not shown as a second seat", () => {
+test("the default ~/.claude login is named as the Mac pool login, not shown as a second seat", () => {
   const login = { id: "mac-max", email: "gus@example.com", host: "mac" };
-  assert.equal(seatSubtitle(login), "default ~/.claude login, not a fleet seat · Mac");
-  assert.equal(seatSubtitle({ ...login, email: null }), "default ~/.claude login, not a fleet seat · Mac");
+  assert.equal(seatSubtitle(login), "default ~/.claude login (Mac pool host) · Mac");
+  assert.equal(seatSubtitle({ ...login, email: null }), "default ~/.claude login (Mac pool host) · Mac");
 });
 
 // ---- The live-shaped summary (2026-10-30) ----------------------------------------------------
