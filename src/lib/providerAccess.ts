@@ -12,6 +12,7 @@ export const PLAN_LABELS: Record<string, string> = {
   "kimi-api": "Kimi API credits",
   "openrouter-api": "OpenRouter credits",
   "treg-api": "treg credits",
+  "minimax-lightcloud007": "MiniMax · lightcloud007",
   "claude-mac-gustavo": "Claude · Gustavo", "claude-mac-main": "Claude · Main",
   "claude-mac-096": "Claude · 096", "claude-windows": "Claude · Windows", "claude-wsl": "Claude · WSL",
 };
