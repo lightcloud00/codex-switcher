@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime, openExternalUrl } from "../lib/platform";
+import { buildGrokRows } from "../lib/clientStatus";
 import { planDatesText } from "../lib/overview";
 import { dateChanged, hasUnsavedDates, mergeRefresh, pendingDateLabel, PLAN_LABELS, signInLabel, type PlanDates, type PlanView, type SignIn } from "../lib/providerAccess";
 interface Provider { id: string; label: string; installed: boolean; signedIn: SignIn; signInDetail: string; signInCheckedAt: string | null }
@@ -57,6 +58,16 @@ export function ProviderAccessPanel() {
       {p.id !== "credvault" && <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void openExternalUrl(DETAILS[p.id].url)}>Account</button>}
       <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void navigator.clipboard.writeText(DETAILS[p.id].command).then(() => setMessage("CLI command copied.")).catch(() => setError("Clipboard unavailable"))}>Copy CLI</button></div>
     </article>)}</div>
+    <div className="space-y-2" aria-label="Grok Bot accounts">
+      <h3 className="font-semibold">Grok Bots</h3>
+      <p className="text-xs text-gray-500">Bot and computer associations: Fleet Atlas, verified October 30, 2026. These are cloud bots, separate from the Grok CLI. Account identity, sign-in, plan, reset and renewal require a current account check.</p>
+      <div className="grid gap-3 md:grid-cols-3">{buildGrokRows([], Date.now()).map(row => <article key={row.id} className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-1">
+        <h4 className="font-semibold">{row.account}</h4><p className="text-sm">{row.detail}</p>
+        <p className="text-xs text-gray-500">Usage left: {row.left} · {row.status}</p>
+        <p className="text-xs text-gray-500">Plan, reset and renewal: unknown</p>
+      </article>)}</div>
+      <p className="text-xs text-gray-500">Usage is not checked here. The Overview can show dated manual readings from the optional status helper.</p>
+    </div>
     <article className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-2" aria-label="MiniMax lightcloud007">
       <h3 className="font-semibold">MiniMax · lightcloud007</h3>
       <p className="text-sm">CredVault logical credential: <code className="break-all">minimaxlightcloud007expiressept18th50plan</code>. Switcher does not read or store its value.</p>
