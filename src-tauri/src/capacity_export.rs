@@ -11,7 +11,7 @@ use std::{collections::HashMap, fs, path::Path};
 
 use crate::{
     api::usage::refresh_all_usage,
-    auth::load_accounts,
+    auth::{load_accounts, read_current_auth, reconcile_active_account_with_live_auth},
     commands::{
         check_codex_processes, load_summary_for_capacity, merge_seats, read_seat_registry,
         SeatReading,
@@ -392,7 +392,13 @@ pub async fn export_capacity(
     admission_path: Option<&Path>,
     include_claude_seats: bool,
 ) -> Result<()> {
-    let store = load_accounts().context("accounts_unavailable")?;
+    let mut store = load_accounts().context("accounts_unavailable")?;
+    // Codex refreshes the active account itself, so fold its live login into
+    // this copy: a renewal then shows here even while the app is closed. The
+    // copy is never saved.
+    if let Ok(Some(auth)) = read_current_auth() {
+        reconcile_active_account_with_live_auth(&mut store, &auth);
+    }
     let usage = refresh_all_usage(&store.accounts).await;
     let process = check_codex_processes()
         .await
