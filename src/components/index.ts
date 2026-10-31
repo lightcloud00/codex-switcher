@@ -4,3 +4,4 @@ export { AddAccountModal } from "./AddAccountModal";
 export { AccountUsageStats } from "./AccountUsageStats";
 export { UpdateChecker } from "./UpdateChecker";
 export { ClaudeUsagePanel } from "./ClaudeUsagePanel";
+export { WindowResizeBorders } from "./WindowResizeBorders";
