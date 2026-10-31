@@ -529,6 +529,18 @@ test("live shape: the gustavo seat reads mac-gustavo-max and no duplicate card a
   assert.ok(!ids(seats).includes("claude-gustavo"));
 });
 
+test("a login signed in to the same account as a seat is not a second card", () => {
+  const sameAccount = { ...apiKeyLogin(), email: " GUS@example.com " };
+  for (const order of [[liveGustavo(), sameAccount], [sameAccount, liveGustavo()]]) {
+    const seats = buildClaudeSeats(registryFixture(), order, null, LIVE_NOW);
+    assert.equal(seats.filter((s) => s.email?.toLowerCase() === "gus@example.com").length, 1);
+    assert.ok(!ids(seats).includes("mac-max"));
+  }
+  // A different account on the default login is still its own card.
+  const other = buildClaudeSeats(registryFixture(), [liveGustavo(), { ...apiKeyLogin(), email: "pool@example.com" }], null, LIVE_NOW);
+  assert.deepEqual(ids(other).slice(5), ["mac-max"]);
+});
+
 test("live shape: the same result whatever order the CLI lists the accounts in", () => {
   const accounts = [retiredAccount(), liveGustavo(), apiKeyLogin()];
   for (const order of [accounts, [...accounts].reverse(), [accounts[1], accounts[2], accounts[0]]]) {

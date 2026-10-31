@@ -468,8 +468,12 @@ export function buildClaudeSeats(
     }
   }
 
+  // A login signed in to an account a seat already shows (the default ~/.claude login, on the same
+  // account as the WSL seat) shares that seat's limits, so it is not a second card.
+  const seatEmails = new Set(seats.map((s) => s.email?.toLowerCase()).filter(Boolean));
   for (const a of accounts) {
     if (claimed.has(a.account) || isRetiredLogin(a, nowMs)) continue;
+    if (seatEmails.has(a.email?.trim().toLowerCase())) continue;
     seats.push(
       seatFromUsage(
         {
