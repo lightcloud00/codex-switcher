@@ -161,17 +161,13 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
         *account_id = Some(current_account_id);
     }
 
-    // Codex refreshes the active account itself, so a renewed plan or
-    // subscription only reaches the store through these tokens. Without this
-    // the active account kept the expiry from its last switcher refresh and
-    // read as expired after renewing.
+    // Codex refreshes the active account itself, so a renewed subscription
+    // only reaches the store through these tokens. Without this the active
+    // account kept the expiry from its last switcher refresh and read as
+    // expired after renewing. The plan is left alone: refresh_account_metadata
+    // stores the live plan, and a token claim would overwrite it with an
+    // older one.
     let claims = parse_chatgpt_id_token_claims(&tokens.id_token);
-    if let Some(plan_type) = claims.plan_type {
-        if account.plan_type.as_ref() != Some(&plan_type) {
-            account.plan_type = Some(plan_type);
-            changed = true;
-        }
-    }
     if let Some(expires_at) = claims.subscription_expires_at {
         if account.subscription_expires_at != Some(expires_at) {
             account.subscription_expires_at = Some(expires_at);
@@ -688,8 +684,9 @@ mod tests {
 
         assert!(sync_active_account_tokens(&mut store, &live));
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-a2");
-        assert_eq!(store.accounts[0].plan_type.as_deref(), Some("pro"));
         assert_eq!(store.accounts[0].subscription_expires_at, Some(renewed));
+        // The plan stays whatever refresh_account_metadata stored.
+        assert_eq!(store.accounts[0].plan_type.as_deref(), Some("plus"));
 
         // Tokens synced before the fix leave a stale expiry behind; the same
         // live tokens repair it once and then report nothing to save.
@@ -698,13 +695,21 @@ mod tests {
         assert_eq!(store.accounts[0].subscription_expires_at, Some(renewed));
         assert!(!sync_active_account_tokens(&mut store, &live));
 
-        // An ID token without the claim keeps the stored expiry.
-        assert!(sync_active_account_tokens(
-            &mut store,
-            &auth("workspace-a", "a3")
-        ));
+        // Another workspace's login carries a later expiry but is not ours.
+        let mut other = auth("workspace-b", "b1");
+        other.tokens.as_mut().unwrap().id_token =
+            id_token_with_subscription("workspace-b", "2027-01-31T00:00:00+00:00", "b1");
+        assert!(!sync_active_account_tokens(&mut store, &other));
         assert_eq!(store.accounts[0].subscription_expires_at, Some(renewed));
-        assert_eq!(store.accounts[0].plan_type.as_deref(), Some("pro"));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-a2");
+
+        // An ID token without the claim keeps the stored expiry, and with
+        // matching tokens there is nothing to save.
+        let mut no_claim = auth("workspace-a", "a3");
+        no_claim.tokens.as_mut().unwrap().id_token = id_token_with_account_id("workspace-a", "a3");
+        assert!(sync_active_account_tokens(&mut store, &no_claim));
+        assert_eq!(store.accounts[0].subscription_expires_at, Some(renewed));
+        assert!(!sync_active_account_tokens(&mut store, &no_claim));
     }
 
     #[test]
