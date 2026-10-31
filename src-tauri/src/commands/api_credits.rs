@@ -7,6 +7,28 @@ const UNEXPECTED: &str = "API credit check returned an unexpected result";
 /// The probe reads its providers in parallel, each capped at 25 s, so this leaves a margin.
 const PROBE_TIMEOUT_SECS: u64 = 60;
 
+/// Prefer a native helper. Windows may use an already installed, read-only Mac metadata bridge.
+/// This never installs SSH access, copies credentials, or changes the local account.
+pub(super) fn find_metadata_helper(name: &str) -> Option<std::path::PathBuf> {
+    find_binary(name).or_else(|| {
+        if !cfg!(windows) {
+            return None;
+        }
+        let path = dirs::home_dir()?.join(format!(".local/bin/fleet-mac-{name}.cmd"));
+        path.is_file().then_some(path)
+    })
+}
+
+pub(super) fn mark_metadata_source(value: &mut serde_json::Value, binary: &std::path::Path) {
+    if binary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("fleet-mac-"))
+    {
+        value["source_host"] = serde_json::json!("mac");
+    }
+}
+
 /// Takes the last stdout line that starts with `{` and accepts it only with the expected schema and a
 /// `providers` array. Anything else is one fixed message, so stray output never reaches the renderer.
 pub fn parse_probe_output(stdout: &str) -> Result<serde_json::Value, String> {
@@ -25,7 +47,6 @@ pub fn parse_probe_output(stdout: &str) -> Result<serde_json::Value, String> {
 
 /// Fixed argv from the caller, no stdin, stderr dropped, stdout capped. Timeout is its own message; a spawn or
 /// read failure is the generic one. The exit status is ignored: the schema check decides validity.
-#[cfg(not(windows))]
 pub(super) async fn run_probe(
     binary: std::path::PathBuf,
     args: &[&str],
@@ -34,13 +55,18 @@ pub(super) async fn run_probe(
 ) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     const STDOUT_CAP: u64 = 256 * 1024;
+    #[cfg(not(windows))]
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:{}",
         std::env::var("PATH").unwrap_or_default()
     );
     let mut cmd = tokio::process::Command::new(binary);
+    #[cfg(not(windows))]
+    cmd.env("PATH", path);
+    // A metadata read must not open a console over the user's desktop.
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     cmd.args(args)
-        .env("PATH", path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -64,21 +90,16 @@ pub(super) async fn run_probe(
         Ok(Some(stdout)) => Ok(stdout),
     }
 }
-#[cfg(windows)]
-pub(super) async fn run_probe(
-    _binary: std::path::PathBuf,
-    _args: &[&str],
-    _secs: u64,
-    what: &str,
-) -> Result<String, String> {
-    Err(format!("{what} is not available on Windows"))
-}
 
 #[tauri::command]
 pub async fn get_api_credits() -> Result<serde_json::Value, String> {
-    let binary = find_binary("api-credit-probe")
+    let binary = find_metadata_helper("api-credit-probe")
         .ok_or("api-credit-probe is not installed on this computer")?;
-    parse_probe_output(&run_probe(binary, &[], PROBE_TIMEOUT_SECS, "API credit check").await?)
+    let mut value = parse_probe_output(
+        &run_probe(binary.clone(), &[], PROBE_TIMEOUT_SECS, "API credit check").await?,
+    )?;
+    mark_metadata_source(&mut value, &binary);
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -120,16 +141,48 @@ mod tests {
             assert_eq!(parse_probe_output(out).unwrap_err(), UNEXPECTED, "{out:?}");
         }
     }
+
+    #[test]
+    fn bridge_results_are_identified_as_mac_observations() {
+        let mut value = serde_json::json!({"schema": SCHEMA, "providers": []});
+        mark_metadata_source(&mut value, std::path::Path::new("api-credit-probe"));
+        assert!(value.get("source_host").is_none());
+        mark_metadata_source(
+            &mut value,
+            std::path::Path::new("fleet-mac-api-credit-probe.cmd"),
+        );
+        assert_eq!(value["source_host"], "mac");
+    }
     #[cfg(not(windows))]
     #[tokio::test]
     async fn run_probe_returns_stdout_and_reports_a_timeout() {
         let out = run_probe("/bin/echo".into(), &["hello"], 10, "API credit check").await;
         assert_eq!(out.unwrap(), "hello\n");
         let started = std::time::Instant::now();
-        let hung = run_probe("/bin/sh".into(), &["-c", "exec sleep 30"], 1, "API credit check").await;
+        let hung = run_probe(
+            "/bin/sh".into(),
+            &["-c", "exec sleep 30"],
+            1,
+            "API credit check",
+        )
+        .await;
         assert_eq!(hung.unwrap_err(), "API credit check timed out");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         let missing = run_probe("/no/such/binary".into(), &[], 10, "API credit check").await;
         assert_eq!(missing.unwrap_err(), UNEXPECTED);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_cmd_helper_runs_without_a_console() {
+        let dir = std::env::temp_dir().join(format!("switcher-helper-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let script = dir.join("metadata helper.cmd");
+        std::fs::write(&script, "@echo off\r\necho metadata-ok\r\n").unwrap();
+        let out = run_probe(script, &[], 10, "Metadata check").await.unwrap();
+        assert_eq!(out.trim(), "metadata-ok");
+        let missing = run_probe(dir.join("missing.exe"), &[], 10, "Metadata check").await;
+        assert_eq!(missing.unwrap_err(), UNEXPECTED);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

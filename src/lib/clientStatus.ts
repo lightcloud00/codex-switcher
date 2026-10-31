@@ -35,6 +35,7 @@ export interface GrokBotRow {
 
 export interface ClientStatusSnapshot {
   schema: string;
+  source_host?: "mac";
   observed_at: string;
   tools: ClientToolRow[];
   grok: GrokBotRow[];

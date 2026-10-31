@@ -242,6 +242,13 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     return () => window.clearInterval(id);
   }, [load]);
 
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    const id = window.setInterval(tick, 15_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, []);
+
   const haveData = summary !== null || registry?.found === true || prom?.found === true;
   const seats = useMemo(() => {
     if (!haveData) return [];
@@ -257,6 +264,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Claude seats</h2>
+          {summary?.source_host === "mac" && <p className="text-xs text-gray-500">Fleet usage from Mac</p>}
           <p className="text-xs text-gray-500 dark:text-gray-400">
             {summary
               ? `Updated ${updatedAgo(summary.generated_at, now)}`

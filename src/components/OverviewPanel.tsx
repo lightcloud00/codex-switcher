@@ -211,6 +211,13 @@ export function OverviewPanel({
     const id = window.setInterval(() => void loadLocal(), REFRESH_MS);
     return () => window.clearInterval(id);
   }, [loadLocal]);
+
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    const id = window.setInterval(tick, 15_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, []);
   const loadClient = useCallback(async (force: boolean) => {
     if (!isTauriRuntime()) return;
     if (!force && clientCache && Date.now() - clientCache.at < CREDITS_TTL_MS) return;
@@ -245,7 +252,7 @@ export function OverviewPanel({
   const activeCodexEmail = accounts.find((a) => a.is_active)?.email ?? null;
   const grok = useMemo(() => sortOverviewRows(buildGrokRows(client?.grok ?? [], now)), [client, now]);
   const tools = useMemo(
-    () => sortOverviewRows(buildToolRows(client?.tools ?? [], activeCodexEmail)),
+    () => sortOverviewRows(buildToolRows(client?.tools ?? [], client?.source_host === "mac" ? null : activeCodexEmail)),
     [client, activeCodexEmail],
   );
 
@@ -271,6 +278,12 @@ export function OverviewPanel({
           <p className="text-xs text-gray-500 dark:text-gray-400">
             {summary ? `Claude usage updated ${updatedAgo(summary.generated_at, now)}` : "Every account and quota in one place"}
           </p>
+          {(summary?.source_host === "mac" || client?.source_host === "mac" || credits?.source_host === "mac") &&
+            <p className="text-xs text-gray-500">
+              {[summary?.source_host === "mac" && "Claude usage", credits?.source_host === "mac" && "API balances",
+                client?.source_host === "mac" && "tool status"].filter(Boolean).join(", ")} from Mac.
+              {" "}Codex accounts are local to this computer.
+            </p>}
         </div>
         <button
           onClick={() => {

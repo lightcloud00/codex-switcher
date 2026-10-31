@@ -11,10 +11,13 @@ use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::time::Duration;
+#[cfg(not(windows))]
 use tokio::process::Command;
 
 const SCHEMA: &str = "claude-usage.summary.v1";
+#[cfg(not(windows))]
 const TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRY_SCHEMA: &str = "aos.subscription_accounts.v1";
 const REGISTRY_RELATIVE: &str =
@@ -44,46 +47,60 @@ pub fn parse_claude_usage(stdout: &str) -> Result<Value, String> {
 
 /// Run `claude-usage --json` (shared by the Tauri command and web mode).
 pub async fn fetch_claude_usage() -> Result<Value, String> {
-    let home = home()?;
-    let binary = home.join(".local/bin/claude-usage");
-    if !binary.exists() {
-        return Err("claude-usage is not installed (~/.local/bin/claude-usage)".to_string());
+    #[cfg(windows)]
+    {
+        use super::api_credits::{find_metadata_helper, mark_metadata_source, run_probe};
+        let binary = find_metadata_helper("claude-usage")
+            .ok_or("claude-usage or its fleet metadata bridge is not installed on this computer")?;
+        let mut value = parse_claude_usage(
+            &run_probe(binary.clone(), &["--json"], 30, "Claude usage check").await?,
+        )?;
+        mark_metadata_source(&mut value, &binary);
+        return Ok(value);
     }
-    // A GUI app starts with a minimal PATH; the CLI needs python3, ssh, node and ccusage.
-    let extra = [".local/bin", ".npm-global/bin"]
-        .iter()
-        .map(|p| home.join(p).to_string_lossy().into_owned())
-        .chain([
-            "/opt/homebrew/bin".to_string(),
-            "/usr/local/bin".to_string(),
-        ]);
-    let path = extra
-        .chain(std::env::var("PATH").ok())
-        .collect::<Vec<_>>()
-        .join(":");
+    #[cfg(not(windows))]
+    {
+        let home = home()?;
+        let binary = home.join(".local/bin/claude-usage");
+        if !binary.exists() {
+            return Err("claude-usage is not installed (~/.local/bin/claude-usage)".to_string());
+        }
+        // A GUI app starts with a minimal PATH; the CLI needs python3, ssh, node and ccusage.
+        let extra = [".local/bin", ".npm-global/bin"]
+            .iter()
+            .map(|p| home.join(p).to_string_lossy().into_owned())
+            .chain([
+                "/opt/homebrew/bin".to_string(),
+                "/usr/local/bin".to_string(),
+            ]);
+        let path = extra
+            .chain(std::env::var("PATH").ok())
+            .collect::<Vec<_>>()
+            .join(":");
 
-    let child = Command::new(&binary)
-        .arg("--json")
-        .env("PATH", path)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(TIMEOUT, child)
-        .await
-        .map_err(|_| format!("claude-usage timed out after {}s", TIMEOUT.as_secs()))?
-        .map_err(|e| format!("could not run claude-usage: {e}"))?;
+        let child = Command::new(&binary)
+            .arg("--json")
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let output = tokio::time::timeout(TIMEOUT, child)
+            .await
+            .map_err(|_| format!("claude-usage timed out after {}s", TIMEOUT.as_secs()))?
+            .map_err(|e| format!("could not run claude-usage: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("no output");
-        let last: String = last.chars().take(300).collect();
-        return Err(format!("claude-usage failed: {last}"));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("no output");
+            let last: String = last.chars().take(300).collect();
+            return Err(format!("claude-usage failed: {last}"));
+        }
+        parse_claude_usage(&String::from_utf8_lossy(&output.stdout))
     }
-    parse_claude_usage(&String::from_utf8_lossy(&output.stdout))
 }
 
 #[tauri::command]
@@ -196,8 +213,21 @@ pub fn read_seat_registry() -> Result<Vec<RegistrySeat>, String> {
     parse_seat_registry(&raw)
 }
 
-/// The `get_claude_seats` payload: `{found, seats, error}`. Never fails; a missing registry is data.
+/// The `get_claude_seats` payload: `{found, seats, error}`. A missing local registry is data;
+/// an installed Windows metadata bridge can supply the fleet registry instead.
 pub async fn fetch_claude_seats() -> Result<Value, String> {
+    #[cfg(windows)]
+    if read_seat_registry().is_err() {
+        if let Some(binary) = super::api_credits::find_metadata_helper("seat-registry") {
+            let seats = parse_seat_registry(
+                &super::api_credits::run_probe(binary.clone(), &[], 30, "Claude seat registry")
+                    .await?,
+            )?;
+            let mut value = json!({"found": true, "seats": seats, "error": null});
+            super::api_credits::mark_metadata_source(&mut value, &binary);
+            return Ok(value);
+        }
+    }
     Ok(match read_seat_registry() {
         Ok(seats) => json!({ "found": true, "seats": seats, "error": null }),
         Err(error) => json!({ "found": false, "seats": [], "error": error }),

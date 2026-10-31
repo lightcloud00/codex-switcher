@@ -155,6 +155,7 @@ export interface ClaudeWorkerRoute {
 
 export interface ClaudeUsageSummary {
   schema: "claude-usage.summary.v1";
+  source_host?: "mac";
   generated_at: string;
   accounts: ClaudeUsageAccount[];
   workers: {
