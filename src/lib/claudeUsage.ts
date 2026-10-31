@@ -67,6 +67,17 @@ function windowAgeS(w: ClaudeUsageWindow | null | undefined, nowMs: number): num
   return Number.isFinite(w.age_s) ? w.age_s : null;
 }
 
+/** Retained readings must expire even when the next refresh fails or the computer wakes from sleep. */
+function windowAt(w: ClaudeUsageWindow | null, nowMs: number): ClaudeUsageWindow | null {
+  if (!w) return null;
+  const age_s = windowAgeS(w, nowMs) ?? w.age_s;
+  const reset = w.resets_at ? Date.parse(w.resets_at) : NaN;
+  if (Number.isFinite(reset) && reset <= nowMs) {
+    return { ...w, age_s, state: "reset", last_used_pct: w.used_pct ?? w.last_used_pct, used_pct: null };
+  }
+  return { ...w, age_s, state: w.state === "current" && age_s > 1800 ? "stale" : w.state };
+}
+
 /** Badge text for a window that is not a fresh reading; "" when current. */
 export function stateLabel(w: ClaudeUsageWindow | null | undefined): string {
   if (!w) return "no data";
@@ -489,7 +500,16 @@ export function buildClaudeSeats(
   }
 
   return seats.map((seat) => {
-    const merged = overlayPrometheus(seat, prom, nowMs);
+    const fiveHour = windowAt(seat.fiveHour, nowMs);
+    const sevenDay = windowAt(seat.sevenDay, nowMs);
+    const current = {
+      ...seat, fiveHour, sevenDay,
+      modelWeeks: Object.fromEntries(Object.entries(seat.modelWeeks).map(([model, w]) => [model, windowAt(w, nowMs)!])),
+      status: seat.usageAccount
+        ? seatStatus({ five_hour: fiveHour, seven_day: sevenDay, probe_error: seat.probeError })
+        : seat.status,
+    };
+    const merged = overlayPrometheus(current, prom, nowMs);
     const lastReadAgeS = newestReadingAgeS(merged, prom, nowMs);
     const withAge = { ...merged, lastReadAgeS };
     return { ...withAge, unknownReason: merged.status === "unknown" ? unknownReason(withAge) : null };

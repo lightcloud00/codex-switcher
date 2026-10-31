@@ -1,8 +1,7 @@
 //! Coding-client and Grok Bot status. Runs the `fleet-client-status` script, which reads versions, sign-in state
 //! and the last hand-typed Grok usage from local files and each client's own status command (plus two read-only
 //! ssh reads for the Windows and Miguel Grok Bots). This module only relays the script's JSON.
-use super::api_credits::run_probe;
-use super::provider_access::find_binary;
+use super::api_credits::{find_metadata_helper, mark_metadata_source, run_probe};
 
 const SCHEMA: &str = "aos.client-status.v1";
 const UNEXPECTED: &str = "Client status check returned an unexpected result";
@@ -27,9 +26,19 @@ pub fn parse_status_output(stdout: &str) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub async fn get_client_status() -> Result<serde_json::Value, String> {
-    let binary = find_binary("fleet-client-status")
+    let binary = find_metadata_helper("fleet-client-status")
         .ok_or("fleet-client-status is not installed on this computer")?;
-    parse_status_output(&run_probe(binary, &[], STATUS_TIMEOUT_SECS, "Client status check").await?)
+    let mut value = parse_status_output(
+        &run_probe(
+            binary.clone(),
+            &[],
+            STATUS_TIMEOUT_SECS,
+            "Client status check",
+        )
+        .await?,
+    )?;
+    mark_metadata_source(&mut value, &binary);
+    Ok(value)
 }
 
 #[cfg(test)]

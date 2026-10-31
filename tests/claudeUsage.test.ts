@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   accountSubtitle,
   accountTitle,
-  buildClaudeSeats,
+  buildClaudeSeats as buildSeats,
   formatPct,
   formatTokens,
   hasLiveWindow,
@@ -51,6 +51,50 @@ function win(partial: Partial<ClaudeUsageWindow>): ClaudeUsageWindow {
 }
 
 const NOW = Date.parse("2026-10-11T17:00:00Z");
+
+// Fixture dates are fixed; production evaluates the same summary as the wall clock advances.
+const buildClaudeSeats = (registry: Parameters<typeof buildSeats>[0], accounts: ClaudeUsageAccount[],
+  prom?: ClaudePromSnapshot | null, nowMs = NOW) => buildSeats(registry, accounts, prom, nowMs);
+
+test("retained exhausted readings expire at the reset boundary without a successful refresh", () => {
+  const resetAt = NOW + 60_000;
+  const account: ClaudeUsageAccount = {
+    account: "mac-main-max", email: null, probe_error: null, pool_spend_today_usd: null,
+    five_hour: win({ used_pct: 100, resets_at: new Date(resetAt).toISOString() }),
+    seven_day: win({ used_pct: 100, resets_at: new Date(resetAt).toISOString() }),
+    model_weeks: { sonnet: win({ used_pct: 100, resets_at: new Date(resetAt).toISOString() }) },
+  };
+  assert.equal(buildClaudeSeats([], [account], null, resetAt - 1).find(s => s.usageAccount === account.account)?.status, "exhausted");
+  const reset = buildClaudeSeats([], [account], null, resetAt).find(s => s.usageAccount === account.account)!;
+  assert.equal(reset.status, "unknown");
+  assert.equal(reset.fiveHour?.used_pct, null);
+  assert.equal(reset.sevenDay?.state, "reset");
+  assert.equal(reset.sevenDay?.last_used_pct, 100);
+  assert.equal(reset.modelWeeks.sonnet.used_pct, null);
+  assert.equal(account.seven_day?.used_pct, 100); // Retained source is not mutated or turned into a claimed 0%.
+});
+
+test("a five-hour reset does not clear an exhausted weekly limit", () => {
+  const account: ClaudeUsageAccount = {
+    account: "mac-main-max", email: null, probe_error: null, pool_spend_today_usd: null, model_weeks: {},
+    five_hour: win({ used_pct: 100, resets_at: new Date(NOW).toISOString() }),
+    seven_day: win({ used_pct: 100, resets_at: new Date(NOW + 86_400_000).toISOString() }),
+  };
+  const seat = buildClaudeSeats([], [account]).find(s => s.usageAccount === account.account)!;
+  assert.equal(seat.fiveHour?.state, "reset");
+  assert.equal(seat.status, "exhausted");
+  assert.equal(seat.sevenDay?.used_pct, 100);
+});
+
+test("a fresh post-reset observation replaces the expired percentage", () => {
+  const account: ClaudeUsageAccount = {
+    account: "mac-main-max", email: null, probe_error: null, pool_spend_today_usd: null, model_weeks: {},
+    five_hour: win({ used_pct: 2 }), seven_day: win({ used_pct: 1 }),
+  };
+  const seat = buildClaudeSeats([], [account]).find(s => s.usageAccount === account.account)!;
+  assert.equal(seat.status, "ok");
+  assert.equal(seat.sevenDay?.used_pct, 1);
+});
 
 test("formatPct rounds and shows a dash for missing or reset windows", () => {
   assert.equal(formatPct(win({ used_pct: 82.6 })), "83%");

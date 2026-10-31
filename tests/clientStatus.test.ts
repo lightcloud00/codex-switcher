@@ -57,48 +57,42 @@ test("signed-out tools are bad; a missing IDE extension is muted and sorts as in
   assert.match(shared.detail ?? "", /^VS Code 2\.1\.285/);
 });
 
-test("Grok shows the hand reading with its age and flags it stale after a day", () => {
-  const [fresh, stale] = buildGrokRows(
-    [
-      grok({ used_percent: 40, used_observed_at: "2026-10-30T12:30:00Z" }),
-      grok({ used_percent: 1, used_observed_at: "2026-10-28T05:30:00Z" }),
-    ],
-    NOW,
-  );
-  assert.equal(fresh.left, "60% (read 4h ago)");
-  assert.equal(fresh.tone, "ok");
-  assert.equal(stale.left, "99% (read 2d ago, stale)");
-  assert.equal(stale.tone, "warn");
-  assert.equal(stale.type, "Grok Ultra");
-  assert.equal(stale.renews, "Ends 2026-11-23 (renewal off)");
+test("three named bots remain visible without a helper and never claim account status or reset", () => {
+  const rows = buildGrokRows([], NOW);
+  assert.deepEqual(rows.map(r => r.account), ["Pebble", "Kiwi", "Pip"]);
+  for (const row of rows) {
+    assert.equal(row.status, "unverified");
+    assert.equal(row.left, "not recorded");
+    assert.equal(row.resets, "—");
+    assert.equal(row.renews, "—");
+  }
+});
+test("valid manual readings carry age and stale indication; invalid and future readings stay unknown", () => {
+  const rows = buildGrokRows([
+    grok({ used_percent: 40, used_observed_at: "2026-10-30T12:30:00Z" }),
+    grok({ id: "grok-windows", used_percent: 1, used_observed_at: "2026-10-28T05:30:00Z" }),
+    grok({ id: "grok-miguel", used_percent: 200, used_observed_at: "2026-10-30T12:30:00Z" }),
+  ], NOW);
+  assert.equal(rows[0].left, "60% (manual reading 4h ago)");
+  assert.equal(rows[1].left, "99% (manual reading 2d ago, stale)");
+  assert.equal(rows[2].left, "not recorded");
+  assert.equal(buildGrokRows([grok({used_percent: 10, used_observed_at: "2026-10-31T12:00:00Z"})], NOW)[0].left, "not recorded");
+  assert.equal(buildGrokRows([grok({used_percent: 10, used_observed_at: "invalid"})], NOW)[0].left, "not recorded");
+});
+test("old helper account, plan and sign-in fields are not presented as current proof", () => {
+  const [row] = buildGrokRows([grok({ account: "old@example.com", signed_in: true, cli_signed_in: true })], NOW);
+  assert.equal(row.account, "Pebble");
+  assert.equal(row.status, "unverified");
+  assert.equal(row.type, "Grok Bot");
+  assert.equal(row.renews, "—");
+  assert.match(row.detail ?? "", /unverified/);
+  assert.equal(buildGrokRows([grok({error: "unreachable"})], NOW)[0].status, "host unreachable");
 });
 
-test("a Grok row with a known account shows the email and moves the bot name to the detail line", () => {
-  const [known, unknown] = buildGrokRows(
-    [grok({ id: "grok-windows", computer: "Windows main", bot: "Kiwi", account: "kiwi@example.com" }), grok({})],
-    NOW,
-  );
-  assert.equal(known.account, "kiwi@example.com");
-  assert.match(known.detail ?? "", /^Kiwi · Windows main/);
-  assert.equal(unknown.account, "Grok Bot");
-  assert.match(unknown.detail ?? "", /^Mac/);
-});
-
-test("Grok without a reading never invents a percent; unreachable and signed-out computers say so", () => {
-  const [none, down, out] = buildGrokRows(
-    [
-      grok({ id: "grok-windows", computer: "Windows main", bot: "Kiwi", plan: null, renews: null, cli_signed_in: false }),
-      grok({ id: "grok-miguel", bot: "Pip", signed_in: null, error: "unreachable" }),
-      grok({ signed_in: false }),
-    ],
-    NOW,
-  );
-  assert.equal(none.left, "not recorded");
-  assert.equal(none.type, "Grok");
-  assert.match(none.detail ?? "", /plan not recorded/);
-  assert.equal(none.renews, "—");
-  assert.match(none.detail ?? "", /Grok CLI signed out/);
-  assert.equal(down.status, "unreachable");
-  assert.equal(out.status, "signed out");
-  assert.equal(out.tone, "bad");
+test("duplicate helper IDs never create duplicate cards or select an ambiguous reading", () => {
+  const reading = grok({ used_percent: 40, used_observed_at: "2026-10-30T12:30:00Z" });
+  const rows = buildGrokRows([reading, { ...reading, used_percent: 90 }], NOW);
+  assert.equal(rows.length, 3);
+  assert.equal(new Set(rows.map(row => row.id)).size, 3);
+  assert.equal(rows[0].left, "not recorded");
 });

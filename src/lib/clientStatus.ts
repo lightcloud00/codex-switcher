@@ -35,6 +35,7 @@ export interface GrokBotRow {
 
 export interface ClientStatusSnapshot {
   schema: string;
+  source_host?: "mac";
   observed_at: string;
   tools: ClientToolRow[];
   grok: GrokBotRow[];
@@ -81,32 +82,34 @@ export function buildToolRows(tools: ClientToolRow[], activeCodexEmail?: string 
   });
 }
 
-/** Grok rows: the last hand reading with its age, never an invented percent; "not recorded" without one. */
+/** These labels identify the fleet's bot/host associations, not authenticated accounts. */
+const GROK_BOTS = [
+  { id: "grok-mac", bot: "Pebble", computer: "Mac" },
+  { id: "grok-windows", bot: "Kiwi", computer: "Windows main" },
+  { id: "grok-miguel", bot: "Pip", computer: "Miguel’s Windows" },
+] as const;
+
+/** Show each known bot even when the optional metadata helper is unavailable. */
 export function buildGrokRows(rows: GrokBotRow[], nowMs: number): OverviewRow[] {
-  return rows.map((g) => {
-    const reading = g.used_percent !== null && g.used_observed_at;
-    const stale = reading ? nowMs - Date.parse(g.used_observed_at as string) > STALE_MS : false;
-    const left = reading
-      ? `${leftText(g.used_percent)} (read ${ageText(g.used_observed_at as string, nowMs)}${stale ? ", stale" : ""})`
-      : "not recorded";
-    const detail = [
-      g.account && g.bot,
-      g.computer,
-      g.app_version && `app v${g.app_version}`,
-      g.cli_signed_in === false ? "Grok CLI signed out" : g.cli_signed_in ? "Grok CLI signed in" : null,
-      !g.plan && "plan not recorded",
-    ].filter(Boolean);
-    const status = g.error === "unreachable" ? "unreachable" : g.error ? "not checked" : g.signed_in ? "signed in" : "signed out";
+  return GROK_BOTS.map((bot) => {
+    const matches = rows.filter(row => row.id === bot.id);
+    // Duplicate identities cannot safely be associated with one account.
+    const g = matches.length === 1 ? matches[0] : undefined;
+    const observed = g?.used_observed_at ? Date.parse(g.used_observed_at) : NaN;
+    const pct = g?.used_percent;
+    const valid = typeof pct === "number" && Number.isFinite(pct) && pct >= 0 && pct <= 100
+      && Number.isFinite(observed) && observed <= nowMs;
+    const stale = valid && nowMs - observed > STALE_MS;
     return {
-      id: `grok:${g.id}`,
-      account: g.account?.trim() || g.bot,
-      detail: detail.join(" · "),
-      type: g.plan || "Grok",
-      left,
-      resets: "Weekly pool",
-      renews: g.renews || NONE,
-      status,
-      tone: status === "signed in" ? (stale || !reading ? "warn" : "ok") : status === "signed out" ? "bad" : "warn",
+      id: `grok:${bot.id}`,
+      account: bot.bot,
+      detail: `${bot.computer} · cloud account and app sign-in unverified`,
+      type: "Grok Bot",
+      left: valid ? `${leftText(pct)} (manual reading ${ageText(g!.used_observed_at!, nowMs)}${stale ? ", stale" : ""})` : "not recorded",
+      resets: NONE,
+      renews: NONE,
+      status: g?.error === "unreachable" ? "host unreachable" : "unverified",
+      tone: "warn",
       inactive: false,
     };
   });

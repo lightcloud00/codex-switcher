@@ -33,6 +33,7 @@ export interface ApiCreditRow {
 }
 export interface ApiCreditsSnapshot {
   schema: string;
+  source_host?: "mac";
   observed_at: string;
   providers: ApiCreditRow[];
 }
