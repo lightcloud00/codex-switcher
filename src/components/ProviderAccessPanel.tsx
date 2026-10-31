@@ -57,6 +57,11 @@ export function ProviderAccessPanel() {
       {p.id !== "credvault" && <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void openExternalUrl(DETAILS[p.id].url)}>Account</button>}
       <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void navigator.clipboard.writeText(DETAILS[p.id].command).then(() => setMessage("CLI command copied.")).catch(() => setError("Clipboard unavailable"))}>Copy CLI</button></div>
     </article>)}</div>
+    <article className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-2" aria-label="MiniMax lightcloud007">
+      <h3 className="font-semibold">MiniMax · lightcloud007</h3>
+      <p className="text-sm">CredVault logical credential: <code className="break-all">minimaxlightcloud007expiressept18th50plan</code>. Switcher does not read or store its value.</p>
+      <p className="text-xs text-gray-500">Availability is not checked by Switcher. Verify through the configured client; the name does not establish a renewal or expiry date.</p>
+    </article>
     <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-3"><h3 className="font-semibold">Renewal & expiry</h3>
       {dateSummaries.length ? <ul className="space-y-1 text-sm">{dateSummaries.map(d => <li key={d.id}><span className="font-medium">{PLAN_LABELS[d.id] ?? d.id}</span> <span className="text-gray-500">· {d.text}</span></li>)}</ul> : <p className="text-sm text-gray-500">No plan dates set.</p>}
       <details><summary className="cursor-pointer text-sm font-medium">Edit plan dates{unsavedDates && <span className="ml-2 text-amber-700 dark:text-amber-300">Unsaved changes</span>}</summary>

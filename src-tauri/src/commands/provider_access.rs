@@ -24,6 +24,7 @@ const PLAN_IDS: &[&str] = &[
     "kimi-api",
     "openrouter-api",
     "treg-api",
+    "minimax-lightcloud007",
 ];
 fn dates_path() -> Result<PathBuf, String> {
     Ok(dirs::config_dir()
@@ -482,7 +483,7 @@ mod tests {
         let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(rows.len(), PLAN_IDS.len());
         assert_eq!(ids[0], "x-subscription");
-        for id in ["deepseek-api", "fireworks-api", "kimi-api", "openrouter-api", "treg-api"] {
+        for id in ["deepseek-api", "fireworks-api", "kimi-api", "openrouter-api", "treg-api", "minimax-lightcloud007"] {
             assert!(ids.contains(&id), "{id}");
         }
         assert_eq!(rows[0].billing_renews_on.as_deref(), Some("2026-11-13"));
