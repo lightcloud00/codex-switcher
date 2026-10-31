@@ -92,7 +92,9 @@ const GROK_BOTS = [
 /** Show each known bot even when the optional metadata helper is unavailable. */
 export function buildGrokRows(rows: GrokBotRow[], nowMs: number): OverviewRow[] {
   return GROK_BOTS.map((bot) => {
-    const g = rows.find(row => row.id === bot.id);
+    const matches = rows.filter(row => row.id === bot.id);
+    // Duplicate identities cannot safely be associated with one account.
+    const g = matches.length === 1 ? matches[0] : undefined;
     const observed = g?.used_observed_at ? Date.parse(g.used_observed_at) : NaN;
     const pct = g?.used_percent;
     const valid = typeof pct === "number" && Number.isFinite(pct) && pct >= 0 && pct <= 100

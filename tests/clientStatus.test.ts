@@ -88,3 +88,11 @@ test("old helper account, plan and sign-in fields are not presented as current p
   assert.match(row.detail ?? "", /unverified/);
   assert.equal(buildGrokRows([grok({error: "unreachable"})], NOW)[0].status, "host unreachable");
 });
+
+test("duplicate helper IDs never create duplicate cards or select an ambiguous reading", () => {
+  const reading = grok({ used_percent: 40, used_observed_at: "2026-10-30T12:30:00Z" });
+  const rows = buildGrokRows([reading, { ...reading, used_percent: 90 }], NOW);
+  assert.equal(rows.length, 3);
+  assert.equal(new Set(rows.map(row => row.id)).size, 3);
+  assert.equal(rows[0].left, "not recorded");
+});

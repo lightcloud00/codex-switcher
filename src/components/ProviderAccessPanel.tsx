@@ -64,7 +64,7 @@ export function ProviderAccessPanel() {
       <div className="grid gap-3 md:grid-cols-3">{buildGrokRows([], Date.now()).map(row => <article key={row.id} className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-1">
         <h4 className="font-semibold">{row.account}</h4><p className="text-sm">{row.detail}</p>
         <p className="text-xs text-gray-500">Usage left: {row.left} · {row.status}</p>
-        <p className="text-xs text-gray-500">Plan, reset and renewal: unknown</p>
+        <p className="text-xs text-gray-500">Plan and renewal: unknown · Reset source unavailable</p>
       </article>)}</div>
       <p className="text-xs text-gray-500">Usage is not checked here. The Overview can show dated manual readings from the optional status helper.</p>
     </div>
