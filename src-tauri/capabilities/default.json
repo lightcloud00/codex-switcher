@@ -13,7 +13,6 @@
     "core:window:allow-toggle-maximize",
     "opener:default",
     "dialog:default",
-    "updater:default",
     "process:default"
   ]
 }

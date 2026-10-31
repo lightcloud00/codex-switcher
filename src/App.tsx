@@ -10,7 +10,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
-import { AccountCard, AddAccountModal, ClaudeUsagePanel, UpdateChecker, WindowResizeBorders } from "./components";
+import { AccountCard, AddAccountModal, ClaudeUsagePanel, WindowResizeBorders } from "./components";
 import type { AccountInfo, AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -2400,8 +2400,6 @@ function App() {
           </div>
         </div>
       )}
-      <UpdateChecker />
-
     </div>
   );
 }
