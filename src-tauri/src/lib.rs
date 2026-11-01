@@ -20,7 +20,7 @@ use commands::{
     get_provider_access, get_usage, get_use_next_plan, hide_tray_window,
     import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
     launch_provider, list_accounts, open_main_window, quit_app, refresh_account_metadata,
-    refresh_all_accounts_usage, rename_account, report_usage, save_provider_dates,
+    refresh_all_accounts_usage, rename_account, report_usage, report_use_next, save_provider_dates,
     set_dock_display_mode, set_masked_account_ids, start_login, switch_account, warmup_account,
     warmup_all_accounts,
 };
@@ -110,6 +110,7 @@ pub fn run() {
             open_main_window,
             quit_app,
             report_usage,
+            report_use_next,
             get_dock_display_mode,
             set_dock_display_mode,
             complete_close_behavior,

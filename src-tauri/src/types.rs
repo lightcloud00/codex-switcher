@@ -25,6 +25,8 @@ pub enum TrayDisplayMode {
     IconAndSession,
     #[default]
     ActiveUsageText,
+    /// The main window's top "Use next" pick, pushed via `report_use_next`.
+    UseNextText,
     Hidden,
 }
 
@@ -549,6 +551,34 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+    }
+
+    #[test]
+    fn use_next_text_tray_mode_round_trips_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&TrayDisplayMode::UseNextText).unwrap(),
+            "\"use_next_text\""
+        );
+        assert_eq!(
+            serde_json::from_str::<TrayDisplayMode>("\"use_next_text\"").unwrap(),
+            TrayDisplayMode::UseNextText
+        );
+
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"tray_display_mode":"use_next_text"}"#).unwrap();
+        assert_eq!(settings.tray_display_mode, TrayDisplayMode::UseNextText);
+    }
+
+    #[test]
+    fn settings_saved_before_use_next_text_still_load() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"tray_display_mode":"icon_and_session","dock_display_mode":"menu_bar_only"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.tray_display_mode, TrayDisplayMode::IconAndSession);
+        assert_eq!(settings.dock_display_mode, DockDisplayMode::MenuBarOnly);
+        assert_eq!(TrayDisplayMode::default(), TrayDisplayMode::ActiveUsageText);
     }
 }
 

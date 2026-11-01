@@ -24,6 +24,7 @@ use crate::{
 
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TRAY_USE_NEXT: LazyLock<Mutex<Option<TrayUseNext>>> = LazyLock::new(|| Mutex::new(None));
 static TRAY_SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static TRAY_SWITCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -33,6 +34,8 @@ const TRAY_REFRESH_EVENT: &str = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
 const ACCOUNT_ITEM_PREFIX: &str = "account:";
+const USE_NEXT_ITEM_PREFIX: &str = "use-next:";
+const USE_NEXT_DISABLED_ITEM_ID: &str = "use-next";
 const OPEN_ITEM_ID: &str = "open";
 const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
@@ -44,6 +47,18 @@ const ACCOUNT_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 *
 struct SwitchAccountBlockedPayload {
     account_id: String,
     error: String,
+}
+
+/// The main window's top "Use next" pick, pre-formatted for the tray.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayUseNext {
+    /// Account to switch to from the menu line; None when no account is ready.
+    pub account_id: Option<String>,
+    /// Full line for the native menu, e.g. "Use next: work · 86% left".
+    pub menu_label: String,
+    /// Short menu-bar text, e.g. "work 86%" or "Empty → Sat 3 PM".
+    pub title: String,
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
@@ -225,6 +240,31 @@ pub fn ingest_usage<R: Runtime>(app: &AppHandle<R>, usages: Vec<UsageInfo>) {
     refresh_menu(app);
 }
 
+/// Store the main window's "Use next" pick and refresh the native menu. The main
+/// window ranks accounts; the tray only shows what it was last given.
+pub fn ingest_use_next<R: Runtime>(app: &AppHandle<R>, next: Option<TrayUseNext>) {
+    let changed = match TRAY_USE_NEXT.lock() {
+        Ok(mut stored) => replace_use_next(&mut stored, next),
+        Err(_) => false,
+    };
+    if changed {
+        refresh_menu(app);
+    }
+}
+
+// True when `next` differs from what is stored, so identical pushes skip the refresh.
+fn replace_use_next(stored: &mut Option<TrayUseNext>, next: Option<TrayUseNext>) -> bool {
+    if *stored == next {
+        return false;
+    }
+    *stored = next;
+    true
+}
+
+fn stored_use_next() -> Option<TrayUseNext> {
+    TRAY_USE_NEXT.lock().ok().and_then(|stored| stored.clone())
+}
+
 // ============================================================================
 // React popup window (used on macOS/Windows via tray click events)
 // ============================================================================
@@ -324,6 +364,14 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
                 .build(app)?,
         )?;
     } else {
+        if let Some(next) = stored_use_next() {
+            menu.append(&use_next_item(
+                app,
+                &next,
+                store.active_account_id.as_deref(),
+            )?)?;
+            menu.append(&PredefinedMenuItem::separator(app)?)?;
+        }
         for account in &store.accounts {
             let label = format!("{}{}", account.name, usage_suffix(&account.id));
             let item =
@@ -342,6 +390,31 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
     menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
     Ok(menu)
+}
+
+// Clickable only while the pick names an account other than the active one.
+fn use_next_item<R: Runtime>(
+    app: &AppHandle<R>,
+    next: &TrayUseNext,
+    active_account_id: Option<&str>,
+) -> tauri::Result<tauri::menu::MenuItem<R>> {
+    let target = use_next_switch_target(next, active_account_id);
+    let id = match target {
+        Some(account_id) => use_next_menu_id(account_id),
+        None => USE_NEXT_DISABLED_ITEM_ID.to_string(),
+    };
+    MenuItemBuilder::with_id(id, menu_label(&next.menu_label))
+        .enabled(target.is_some())
+        .build(app)
+}
+
+fn use_next_switch_target<'a>(
+    next: &'a TrayUseNext,
+    active_account_id: Option<&str>,
+) -> Option<&'a str> {
+    next.account_id
+        .as_deref()
+        .filter(|account_id| Some(*account_id) != active_account_id)
 }
 
 #[cfg(target_os = "macos")]
@@ -379,37 +452,42 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         OPEN_ITEM_ID => show_main_window(app),
         QUIT_ITEM_ID => app.exit(0),
         _ => {
-            let Some(account_id) = item_id.strip_prefix(ACCOUNT_ITEM_PREFIX) else {
-                return;
-            };
-
-            let app = app.clone();
-            let account_id = account_id.to_string();
-            let request_sequence = TRAY_SWITCH_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
-            tauri::async_runtime::spawn(async move {
-                let _tray_switch_guard = TRAY_SWITCH_LOCK.lock().await;
-                if request_sequence != TRAY_SWITCH_SEQUENCE.load(Ordering::Acquire) {
-                    return;
-                }
-
-                if let Err(error) = switch_account_by_id(&account_id).await {
-                    eprintln!("Failed to switch account from tray: {error}");
-                    refresh_menu(&app);
-                    if is_codex_running_switch_block(&error) {
-                        show_main_window(&app);
-                        let _ = app.emit(
-                            SWITCH_ACCOUNT_BLOCKED_EVENT,
-                            SwitchAccountBlockedPayload { account_id, error },
-                        );
-                    }
-                    return;
-                }
-
-                refresh_menu(&app);
-                let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
-            });
+            if let Some(account_id) = item_id
+                .strip_prefix(ACCOUNT_ITEM_PREFIX)
+                .or_else(|| item_id.strip_prefix(USE_NEXT_ITEM_PREFIX))
+            {
+                switch_from_tray(app, account_id);
+            }
         }
     }
+}
+
+fn switch_from_tray(app: &AppHandle, account_id: &str) {
+    let app = app.clone();
+    let account_id = account_id.to_string();
+    let request_sequence = TRAY_SWITCH_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
+    tauri::async_runtime::spawn(async move {
+        let _tray_switch_guard = TRAY_SWITCH_LOCK.lock().await;
+        if request_sequence != TRAY_SWITCH_SEQUENCE.load(Ordering::Acquire) {
+            return;
+        }
+
+        if let Err(error) = switch_account_by_id(&account_id).await {
+            eprintln!("Failed to switch account from tray: {error}");
+            refresh_menu(&app);
+            if is_codex_running_switch_block(&error) {
+                show_main_window(&app);
+                let _ = app.emit(
+                    SWITCH_ACCOUNT_BLOCKED_EVENT,
+                    SwitchAccountBlockedPayload { account_id, error },
+                );
+            }
+            return;
+        }
+
+        refresh_menu(&app);
+        let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+    });
 }
 
 fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
@@ -474,7 +552,7 @@ fn refresh_tray_display<R: Runtime>(
                 eprintln!("Failed to refresh tray title: {error}");
             }
         }
-        TrayDisplayMode::ActiveUsageText => {
+        TrayDisplayMode::ActiveUsageText | TrayDisplayMode::UseNextText => {
             if let Err(error) = tray.set_visible(true) {
                 eprintln!("Failed to show tray icon: {error}");
             }
@@ -520,7 +598,16 @@ fn active_tray_title(active_account_id: Option<&str>, mode: TrayDisplayMode) -> 
     match mode {
         TrayDisplayMode::IconAndSession => active_session_title(active_account_id),
         TrayDisplayMode::ActiveUsageText => Some(active_usage_title(active_account_id)),
+        TrayDisplayMode::UseNextText => Some(use_next_title(stored_use_next().as_ref())),
         TrayDisplayMode::Hidden => None,
+    }
+}
+
+// Text-only mode hides the icon, so never return an empty title.
+fn use_next_title(next: Option<&TrayUseNext>) -> String {
+    match next {
+        Some(next) if !next.title.trim().is_empty() => next.title.clone(),
+        _ => "Codex".to_string(),
     }
 }
 
@@ -535,14 +622,12 @@ fn active_usage_title(active_account_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(active_account_id).cloned());
 
     match usage {
-        Some(usage) if usage.error.is_none() => {
-            usage_title(
-                usage.primary_used_percent,
-                usage.primary_window_minutes,
-                usage.secondary_used_percent,
-                usage.secondary_window_minutes,
-            )
-        }
+        Some(usage) if usage.error.is_none() => usage_title(
+            usage.primary_used_percent,
+            usage.primary_window_minutes,
+            usage.secondary_used_percent,
+            usage.secondary_window_minutes,
+        ),
         _ => "H:-- W:--".to_string(),
     }
 }
@@ -555,13 +640,13 @@ fn usage_title(
 ) -> String {
     let mut parts = Vec::new();
     if let Some(remaining) = remaining_percent_label(primary_used_percent) {
-        let label = window_duration_label(primary_window_minutes)
-            .unwrap_or_else(|| "H".to_string());
+        let label =
+            window_duration_label(primary_window_minutes).unwrap_or_else(|| "H".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
     if let Some(remaining) = remaining_percent_label(secondary_used_percent) {
-        let label = window_duration_label(secondary_window_minutes)
-            .unwrap_or_else(|| "W".to_string());
+        let label =
+            window_duration_label(secondary_window_minutes).unwrap_or_else(|| "W".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
 
@@ -615,8 +700,8 @@ fn usage_suffix(account_id: &str) -> String {
 
     let mut parts = Vec::new();
     if let Some(remaining) = session_remaining_title(usage.primary_used_percent, false) {
-        let label = window_duration_label(usage.primary_window_minutes)
-            .unwrap_or_else(|| "S".to_string());
+        let label =
+            window_duration_label(usage.primary_window_minutes).unwrap_or_else(|| "S".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
     if let Some(used) = usage.secondary_used_percent {
@@ -636,6 +721,10 @@ fn usage_suffix(account_id: &str) -> String {
 
 fn account_menu_id(account_id: &str) -> String {
     format!("{ACCOUNT_ITEM_PREFIX}{account_id}")
+}
+
+fn use_next_menu_id(account_id: &str) -> String {
+    format!("{USE_NEXT_ITEM_PREFIX}{account_id}")
 }
 
 fn menu_label(label: &str) -> String {
@@ -787,6 +876,14 @@ mod tests {
     }
 
     #[test]
+    fn use_next_ids_do_not_collide_with_account_ids() {
+        assert_eq!(use_next_menu_id("abc-123"), "use-next:abc-123");
+        assert!(!use_next_menu_id("abc-123").starts_with(ACCOUNT_ITEM_PREFIX));
+        assert!(!USE_NEXT_DISABLED_ITEM_ID.starts_with(USE_NEXT_ITEM_PREFIX));
+        assert!(!USE_NEXT_DISABLED_ITEM_ID.starts_with(ACCOUNT_ITEM_PREFIX));
+    }
+
+    #[test]
     fn menu_labels_escape_mnemonic_markers() {
         assert_eq!(
             menu_label("Research & Development"),
@@ -831,17 +928,17 @@ mod tests {
             usage_title(None, None, Some(35.0), Some(7 * 24 * 60)),
             "7d:65%"
         );
-        assert_eq!(
-            usage_title(Some(27.0), Some(5 * 60), None, None),
-            "5h:73%"
-        );
+        assert_eq!(usage_title(Some(27.0), Some(5 * 60), None, None), "5h:73%");
         assert_eq!(usage_title(None, None, None, None), "H:-- W:--");
     }
 
     #[test]
     fn window_duration_labels_round_to_hours_and_days() {
         assert_eq!(window_duration_label(Some(5 * 60)), Some("5h".to_string()));
-        assert_eq!(window_duration_label(Some(12 * 60)), Some("12h".to_string()));
+        assert_eq!(
+            window_duration_label(Some(12 * 60)),
+            Some("12h".to_string())
+        );
         assert_eq!(
             window_duration_label(Some(7 * 24 * 60)),
             Some("7d".to_string())
@@ -864,6 +961,78 @@ mod tests {
     fn hidden_tray_mode_has_no_title() {
         assert_eq!(
             active_tray_title(Some("active"), TrayDisplayMode::Hidden),
+            None
+        );
+    }
+
+    fn sample_use_next(account_id: Option<&str>) -> TrayUseNext {
+        TrayUseNext {
+            account_id: account_id.map(str::to_string),
+            menu_label: "Use next: a · 86% left".to_string(),
+            title: "a 86%".to_string(),
+        }
+    }
+
+    #[test]
+    fn tray_use_next_deserializes_from_camel_case() {
+        let next: TrayUseNext = serde_json::from_str(
+            r#"{"accountId":"a","menuLabel":"Use next: a · 86% left","title":"a 86%"}"#,
+        )
+        .unwrap();
+        assert_eq!(next, sample_use_next(Some("a")));
+
+        let empty: TrayUseNext = serde_json::from_str(
+            r#"{"accountId":null,"menuLabel":"Use next: none ready","title":"Empty"}"#,
+        )
+        .unwrap();
+        assert_eq!(empty.account_id, None);
+        assert_eq!(empty.title, "Empty");
+
+        let value = serde_json::to_value(&next).unwrap();
+        assert_eq!(value["accountId"], "a");
+        assert_eq!(value["menuLabel"], "Use next: a · 86% left");
+    }
+
+    #[test]
+    fn use_next_title_falls_back_to_codex() {
+        assert_eq!(use_next_title(None), "Codex");
+        assert_eq!(use_next_title(Some(&sample_use_next(Some("a")))), "a 86%");
+
+        let mut blank = sample_use_next(Some("a"));
+        blank.title = "  ".to_string();
+        assert_eq!(use_next_title(Some(&blank)), "Codex");
+    }
+
+    #[test]
+    fn use_next_mode_title_is_codex_when_nothing_is_stored() {
+        // No test writes the global pick (ingest_use_next needs an app handle).
+        assert_eq!(
+            active_tray_title(Some("active"), TrayDisplayMode::UseNextText),
+            Some("Codex".to_string())
+        );
+    }
+
+    #[test]
+    fn identical_use_next_pushes_do_not_refresh() {
+        let a = Some(sample_use_next(Some("a")));
+        let b = Some(sample_use_next(Some("b")));
+        let mut stored = None;
+        assert!(!replace_use_next(&mut stored, None));
+        assert!(replace_use_next(&mut stored, a.clone()));
+        assert!(!replace_use_next(&mut stored, a));
+        assert!(replace_use_next(&mut stored, b));
+        assert!(replace_use_next(&mut stored, None));
+        assert_eq!(stored, None);
+    }
+
+    #[test]
+    fn use_next_menu_line_switches_only_to_another_account() {
+        let next = sample_use_next(Some("a"));
+        assert_eq!(use_next_switch_target(&next, Some("b")), Some("a"));
+        assert_eq!(use_next_switch_target(&next, None), Some("a"));
+        assert_eq!(use_next_switch_target(&next, Some("a")), None);
+        assert_eq!(
+            use_next_switch_target(&sample_use_next(None), Some("b")),
             None
         );
     }

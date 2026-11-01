@@ -16,6 +16,8 @@ const TRAY_ICON_AND_SESSION_ID: &str = "tray-display-icon-and-session";
 #[cfg(target_os = "macos")]
 const TRAY_ACTIVE_USAGE_TEXT_ID: &str = "tray-display-active-usage-text";
 #[cfg(target_os = "macos")]
+const TRAY_USE_NEXT_TEXT_ID: &str = "tray-display-use-next-text";
+#[cfg(target_os = "macos")]
 const TRAY_HIDDEN_ID: &str = "tray-display-hidden";
 #[cfg(target_os = "macos")]
 const DESKTOP_REOPEN_SETTINGS_ID: &str = "desktop-reopen-settings";
@@ -81,6 +83,7 @@ fn tray_display_mode_for_item(item_id: &str) -> Option<TrayDisplayMode> {
     Some(match item_id {
         TRAY_ICON_AND_SESSION_ID => TrayDisplayMode::IconAndSession,
         TRAY_ACTIVE_USAGE_TEXT_ID => TrayDisplayMode::ActiveUsageText,
+        TRAY_USE_NEXT_TEXT_ID => TrayDisplayMode::UseNextText,
         TRAY_HIDDEN_ID => TrayDisplayMode::Hidden,
         _ => return None,
     })
@@ -242,6 +245,14 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             )?,
             &CheckMenuItem::with_id(
                 app,
+                TRAY_USE_NEXT_TEXT_ID,
+                "Use next",
+                true,
+                settings.tray_display_mode == TrayDisplayMode::UseNextText,
+                None::<&str>,
+            )?,
+            &CheckMenuItem::with_id(
+                app,
                 TRAY_HIDDEN_ID,
                 "Hidden",
                 true,
@@ -384,7 +395,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{ensure_dock_entry_for_tray_mode, ensure_menu_bar_entry_for_dock_mode};
+    use super::{
+        ensure_dock_entry_for_tray_mode, ensure_menu_bar_entry_for_dock_mode,
+        tray_display_mode_for_item, TRAY_USE_NEXT_TEXT_ID,
+    };
     use crate::types::{AppSettings, DockDisplayMode, TrayDisplayMode};
 
     #[test]
@@ -411,5 +425,14 @@ mod tests {
         assert!(ensure_dock_entry_for_tray_mode(&mut settings));
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::Hidden);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
+    }
+
+    #[test]
+    fn use_next_menu_item_maps_to_use_next_text_mode() {
+        assert_eq!(
+            tray_display_mode_for_item(TRAY_USE_NEXT_TEXT_ID),
+            Some(TrayDisplayMode::UseNextText)
+        );
+        assert_eq!(tray_display_mode_for_item("tray-display-unknown"), None);
     }
 }
