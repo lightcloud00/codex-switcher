@@ -1,6 +1,7 @@
 import { ProviderAccessPanel } from "./components/ProviderAccessPanel";
 import { ApiCreditsPanel } from "./components/ApiCreditsPanel";
 import { OverviewPanel } from "./components/OverviewPanel";
+import { NextAccountsPanel } from "./components/NextAccountsPanel";
 import { isCodexAccountInactive } from "./lib/overview";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAccounts } from "./hooks/useAccounts";
@@ -48,10 +49,11 @@ import {
 import { getTauriWindow } from "./lib/tauriWindow";
 import "./App.css";
 
-type AppView = "overview" | "codex" | "claude" | "providers";
-const APP_VIEWS: readonly AppView[] = ["overview", "codex", "claude", "providers"];
+type AppView = "overview" | "next" | "codex" | "claude" | "providers";
+const APP_VIEWS: readonly AppView[] = ["overview", "next", "codex", "claude", "providers"];
 const VIEW_LABELS: Record<AppView, string> = {
   overview: "Overview",
+  next: "Use next",
   codex: "Codex",
   claude: "Claude",
   providers: "Providers",
@@ -615,21 +617,23 @@ function App() {
     };
   }, []);
 
-  const handleSwitch = async (accountId: string) => {
+  // True only when the account was switched here; a switch that waits on closing Codex returns false.
+  const handleSwitch = async (accountId: string): Promise<boolean> => {
     try {
       setSwitchingId(accountId);
       const latestProcessInfo = await checkProcesses();
       if (!latestProcessInfo) {
         showWarmupToast("Could not check running Codex processes. Try again.", true);
-        return;
+        return false;
       }
       if (!latestProcessInfo.can_switch) {
         setPendingSwitchAccountId(accountId);
         setForceCloseConfirmOpen(true);
-        return;
+        return false;
       }
 
       await switchAccount(accountId);
+      return true;
     } catch (err) {
       console.error("Failed to switch account:", err);
       const latestProcessInfo = await checkProcesses();
@@ -639,6 +643,7 @@ function App() {
       } else {
         showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
       }
+      return false;
     } finally {
       setSwitchingId(null);
     }
@@ -1297,6 +1302,15 @@ function App() {
     }
   };
 
+  // The Use next tab's Open button: the usual switch (with its close-Codex prompt), then the usual launch.
+  // A switch that has to close Codex first reopens the desktop app from that prompt instead.
+  const handleOpenFromPlan = async (accountId: string) => {
+    const account = accounts.find((item) => item.id === accountId);
+    if (!account) return;
+    if (!account.is_active && !(await handleSwitch(accountId))) return;
+    if (isTauriRuntime()) await handleOpenCodexApp();
+  };
+
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
@@ -1872,6 +1886,17 @@ function App() {
             accountsError={error}
             masked={allMasked}
             maskedAccountIds={maskedAccounts}
+          />
+        ) : view === "next" ? (
+          <NextAccountsPanel
+            accounts={accounts}
+            accountsLoading={loading && accounts.length === 0}
+            masked={allMasked}
+            maskedAccountIds={maskedAccounts}
+            onOpen={(accountId) => void handleOpenFromPlan(accountId)}
+            openingId={switchingId ?? (isOpeningCodex ? activeAccount?.id ?? null : null)}
+            disabled={isCompletingForceClose}
+            canOpenCodex={isTauriRuntime()}
           />
         ) : view === "providers" ? (
           <div className="space-y-8">

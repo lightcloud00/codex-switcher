@@ -75,12 +75,16 @@ export function useAccounts() {
         // Preserve existing usage data when just updating account info
         setAccounts((prev) => {
           const usageMap = new Map(
-            prev.map((a) => [a.id, { usage: a.usage, usageLoading: a.usageLoading }])
+            prev.map((a) => [
+              a.id,
+              { usage: a.usage, usageLoading: a.usageLoading, usageCheckedAt: a.usageCheckedAt },
+            ])
           );
           return accountList.map((a) => ({
             ...a,
             usage: usageMap.get(a.id)?.usage,
             usageLoading: usageMap.get(a.id)?.usageLoading,
+            usageCheckedAt: usageMap.get(a.id)?.usageCheckedAt,
           }));
         });
       } else {
@@ -189,6 +193,7 @@ export function useAccounts() {
           maxConcurrentUsageRequests
         );
 
+        const checkedAt = Date.now();
         setAccounts((prev) =>
           prev.map((account) => {
             const usage = usageResults.get(account.id);
@@ -197,6 +202,7 @@ export function useAccounts() {
               ...account,
               usage,
               usageLoading: false,
+              usageCheckedAt: checkedAt,
             };
           })
         );
@@ -235,7 +241,7 @@ export function useAccounts() {
       const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
       setAccounts((prev) =>
         prev.map((a) =>
-          a.id === accountId ? { ...a, usage, usageLoading: false } : a
+          a.id === accountId ? { ...a, usage, usageLoading: false, usageCheckedAt: Date.now() } : a
         )
       );
       reportUsageToTray([usage]);
@@ -251,6 +257,7 @@ export function useAccounts() {
                 ...a,
                 usage: buildUsageError(accountId, message, a.plan_type ?? null),
                 usageLoading: false,
+                usageCheckedAt: Date.now(),
               }
             : a
         )

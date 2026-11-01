@@ -8,6 +8,7 @@ use crate::auth::{
     ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
 };
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
+use chrono::{DateTime, Utc};
 use futures::{stream, StreamExt};
 use std::{
     collections::HashMap,
@@ -29,6 +30,17 @@ pub(crate) fn apply_cached_account_metadata(account: &mut AccountInfo) {
         account.plan_type = metadata.plan_type.clone();
     }
     account.subscription_expires_at = metadata.subscription_expires_at;
+}
+
+/// The live subscription date of every account refreshed this session, keyed by account id.
+pub(crate) fn cached_subscription_expiry() -> HashMap<String, Option<DateTime<Utc>>> {
+    let Ok(cache) = ACCOUNT_METADATA_CACHE.lock() else {
+        return HashMap::new();
+    };
+    cache
+        .iter()
+        .map(|(id, metadata)| (id.clone(), metadata.subscription_expires_at))
+        .collect()
 }
 
 /// Fetch usage info for a specific account (shared by the Tauri command and web mode).
