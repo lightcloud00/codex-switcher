@@ -5,6 +5,8 @@ import { NextAccountsPanel } from "./components/NextAccountsPanel";
 import { isCodexAccountInactive } from "./lib/overview";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAccounts } from "./hooks/useAccounts";
+import { useNextPlan } from "./hooks/useNextPlan";
+import { heroPick, planEntries, trayUseNext } from "./lib/nextAccounts";
 import { useDesktopReopen } from "./hooks/useDesktopReopen";
 import { useCodexClosePreference } from "./hooks/useCodexClosePreference";
 import { SettingsModal } from "./components/SettingsModal";
@@ -1311,6 +1313,20 @@ function App() {
     if (isTauriRuntime()) await handleOpenCodexApp();
   };
 
+  // One Use next order for the tab and the tray, ranked whenever the usual usage refresh lands.
+  const { plan: nextPlan, error: nextPlanError } = useNextPlan(accounts);
+  const lastTrayUseNext = useRef("");
+  useEffect(() => {
+    if (!isTauriRuntime() || !nextPlan) return;
+    const next = trayUseNext(heroPick(planEntries(nextPlan, accounts)), Date.now());
+    const key = JSON.stringify(next);
+    if (key === lastTrayUseNext.current) return;
+    lastTrayUseNext.current = key;
+    void invokeBackend("report_use_next", { next }).catch(() => {
+      lastTrayUseNext.current = "";
+    });
+  }, [nextPlan, accounts]);
+
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
@@ -1890,6 +1906,8 @@ function App() {
         ) : view === "next" ? (
           <NextAccountsPanel
             accounts={accounts}
+            plan={nextPlan}
+            planError={nextPlanError}
             accountsLoading={loading && accounts.length === 0}
             masked={allMasked}
             maskedAccountIds={maskedAccounts}
@@ -1897,6 +1915,8 @@ function App() {
             openingId={switchingId ?? (isOpeningCodex ? activeAccount?.id ?? null : null)}
             disabled={isCompletingForceClose}
             canOpenCodex={isTauriRuntime()}
+            onRefresh={() => void handleRefresh()}
+            refreshing={isRefreshing}
           />
         ) : view === "providers" ? (
           <div className="space-y-8">

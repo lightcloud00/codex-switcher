@@ -35,6 +35,20 @@ pub fn report_usage(app: AppHandle, usages: Vec<UsageInfo>) {
     let _ = (app, usages);
 }
 
+/// Receive the main window's top "Use next" pick for the tray. The main window ranks; the tray only shows it.
+#[cfg(desktop)]
+#[tauri::command]
+pub fn report_use_next(app: AppHandle, next: Option<crate::tray::TrayUseNext>) {
+    crate::tray::ingest_use_next(&app, next);
+}
+
+/// Mobile has no tray; accept and drop the pick so the shared handler list compiles.
+#[cfg(not(desktop))]
+#[tauri::command]
+pub fn report_use_next(app: AppHandle, next: Option<serde_json::Value>) {
+    let _ = (app, next);
+}
+
 /// Hide the tray popup window (called by the tray UI after an action).
 #[tauri::command]
 pub fn hide_tray_window(app: AppHandle) {

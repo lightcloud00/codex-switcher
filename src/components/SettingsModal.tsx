@@ -4,7 +4,7 @@ import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import type { DockDisplayMode } from "../types";
 
-type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
+type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "use_next_text" | "hidden";
 interface DisplaySettings {
   tray_display_mode: TrayDisplayMode;
   dock_display_mode: DockDisplayMode | null;
@@ -104,6 +104,7 @@ export function SettingsModal({
                   >
                     <option value="icon_and_session">Icon + Session</option>
                     <option value="active_usage_text">Hourly + Weekly</option>
+                    <option value="use_next_text">Use next</option>
                     <option value="hidden">Hidden</option>
                   </select>
                   {displaySettings.dock_display_mode !== null && (
