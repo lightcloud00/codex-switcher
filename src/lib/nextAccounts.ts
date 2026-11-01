@@ -87,12 +87,13 @@ export function formatClock(ms: number, now: number, format: WhenFormat = {}, wi
   return near ? `${weekday} ${time}` : `${weekday}, ${part({ month: "short", day: "numeric" })}, ${time}`;
 }
 
-/** "Sat 3:30 PM": weekday and time, no zone, for the narrow menu bar. */
-function formatShortClock(ms: number, format: WhenFormat = {}): string {
+/** "Sat 3:30 PM" this week, "Nov 13 3 PM" further out: no zone, for the narrow menu bar. */
+function formatShortClock(ms: number, now: number, format: WhenFormat = {}): string {
   const date = new Date(ms);
   const part = (options: Intl.DateTimeFormatOptions) =>
     new Intl.DateTimeFormat(format.locale, { ...options, timeZone: format.timeZone }).format(date);
-  return `${part({ weekday: "short" })} ${dropZeroMinutes(part({ hour: "numeric", minute: "2-digit" }))}`;
+  const day = ms - now < 6 * DAY ? part({ weekday: "short" }) : part({ month: "short", day: "numeric" });
+  return `${day} ${dropZeroMinutes(part({ hour: "numeric", minute: "2-digit" }))}`;
 }
 
 /** Time left as words: "42 min", "5 hours 10 min", "2 days 4 hours". */
@@ -295,7 +296,11 @@ export interface TrayUseNext {
 }
 
 const TRAY_NAME_MAX = 14;
-const shortName = (name: string) => (name.length > TRAY_NAME_MAX ? `${name.slice(0, TRAY_NAME_MAX - 1)}…` : name);
+// By code point, so an emoji is never cut in half (a lone surrogate would make the tray reject the update).
+const shortName = (name: string) => {
+  const chars = Array.from(name);
+  return chars.length > TRAY_NAME_MAX ? `${chars.slice(0, TRAY_NAME_MAX - 1).join("")}…` : name;
+};
 
 /** Times only, never countdowns: the tray text must not go stale between readings. */
 export function trayUseNext(pick: HeroPick, now: number, format: WhenFormat = {}): TrayUseNext {
@@ -315,7 +320,7 @@ export function trayUseNext(pick: HeroPick, now: number, format: WhenFormat = {}
       return {
         accountId: null,
         menuLabel: `Codex empty until ${formatClock(pick.backAt, now, format, true)}`,
-        title: `Empty → ${formatShortClock(pick.backAt, format)}`,
+        title: `Empty → ${formatShortClock(pick.backAt, now, format)}`,
       };
     default:
       return { accountId: null, menuLabel: "No Codex account is ready", title: "Codex —" };
@@ -371,13 +376,15 @@ export interface StripEvent {
   at: number;
   /** "3:30 PM" in the display zone. */
   time: string;
+  /** For a reset, the window that resets: "weekly", "30d". */
+  window?: string;
 }
 
-/** What happens to an account on each strip day: when it comes back, its weekly reset, and its plan end. */
+/** What happens to an account on each strip day: when it comes back, its long window's reset, and its plan end. */
 export function stripEvents(entry: UseNextEntry, days: StripDay[], format: WhenFormat = {}): Map<string, StripEvent[]> {
   const keys = new Set(days.map((day) => day.key));
   const events = new Map<string, StripEvent[]>();
-  const add = (kind: StripEventKind, at: number | null) => {
+  const add = (kind: StripEventKind, at: number | null, window?: string) => {
     if (at === null) return;
     const key = dayKey(at, format);
     if (!keys.has(key)) return;
@@ -388,12 +395,13 @@ export function stripEvents(entry: UseNextEntry, days: StripDay[], format: WhenF
         new Date(at)
       )
     );
-    list.push({ kind, at, time });
+    list.push(window === undefined ? { kind, at, time } : { kind, at, time, window });
     events.set(key, list);
   };
   const { row, account } = entry;
   if (row.status === "exhausted") add("back", toMs(row.back_at));
-  if (row.status !== "expired") add("reset", usageWindows(account.usage).long?.resetsAt ?? null);
+  const long = usageWindows(account.usage).long;
+  if (row.status !== "expired" && long) add("reset", long.resetsAt, windowLabel(long.minutes));
   add("ends", toMs(row.subscription_expires_at));
   return events;
 }

@@ -19,8 +19,9 @@ export function useNextPlan(accounts: AccountWithUsage[]): { plan: UseNextPlan |
   accountsRef.current = accounts;
 
   // A refresh lands account by account, so after the first plan a short wait turns that burst into one call.
+  // Before the first reading comes back every account would rank as "no reading", so it waits for one.
   useEffect(() => {
-    if (accountsRef.current.length === 0) return;
+    if (usagesForPlan(accountsRef.current).length === 0) return;
     const run = ++latest.current;
     const timer = setTimeout(() => {
       invokeBackend<UseNextPlan>("get_use_next_plan", { usages: usagesForPlan(accountsRef.current) })

@@ -241,12 +241,26 @@ test("trayUseNext gives the tray a ready-made line and short title, names only",
   const empty = trayUseNext({ kind: "empty", entry: entry(), backAt: Date.parse("2026-11-07T20:30:26Z") }, NOW, ET);
   assert.deepEqual(
     { ...empty, menuLabel: plain(empty.menuLabel), title: plain(empty.title) },
-    { accountId: null, menuLabel: "Codex empty until Sat, Nov 7, 3:30 PM EST", title: "Empty → Sat 3:30 PM" }
+    { accountId: null, menuLabel: "Codex empty until Sat, Nov 7, 3:30 PM EST", title: "Empty → Nov 7 3:30 PM" }
   );
   assert.equal(
     trayUseNext({ kind: "ready", entry: entry({}, { name: "a-very-long-account-name" }) }, NOW, ET).title,
     "a-very-long-a… 70%"
   );
+  assert.equal(
+    plain(trayUseNext({ kind: "empty", entry: entry(), backAt: Date.parse("2026-11-03T22:00:00Z") }, NOW, ET).title),
+    "Empty → Tue 5 PM"
+  );
+  // More than six days out, the menu bar names the date, not just a weekday.
+  assert.equal(
+    plain(trayUseNext({ kind: "empty", entry: entry(), backAt: Date.parse("2026-11-13T20:00:00Z") }, NOW, ET).title),
+    "Empty → Nov 13 3 PM"
+  );
+  // Truncation counts characters, so an emoji is never split into a lone surrogate.
+  const emoji = trayUseNext({ kind: "ready", entry: entry({}, { name: "personal-wor\u{1F600}k-long" }) }, NOW, ET).title;
+  assert.equal(emoji, "personal-wor\u{1F600}… 70%");
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(emoji)));
+  assert.doesNotMatch(JSON.stringify(emoji), /\\ud83d/i);
   assert.deepEqual(trayUseNext({ kind: "none" }, NOW, ET), {
     accountId: null,
     menuLabel: "No Codex account is ready",
@@ -280,6 +294,11 @@ test("stripDays steps calendar days through the daylight time change and marks t
     days.filter((day) => day.marked).map((day) => day.day),
     [4, 5, 6, 7, 8]
   );
+  // Starting before the 2 AM fall-back (12:30 AM EDT), 24-hour steps would land on Nov 1 twice.
+  assert.deepEqual(
+    stripDays(Date.parse("2026-11-01T04:30:00Z"), 3, ET).map((day) => day.key),
+    ["2026-11-01", "2026-11-02", "2026-11-03"]
+  );
   // 11:30 PM EST on Nov 1 is still Nov 1 there, though it is Nov 2 in UTC.
   assert.equal(dayKey(Date.parse("2026-11-02T04:30:00Z"), ET), "2026-11-01");
 });
@@ -306,6 +325,26 @@ test("stripEvents places back, weekly reset and plan end on their days", () => {
   assert.equal(ended.size, 0);
   const later = stripEvents(entry({ subscription_expires_at: "2026-11-30T00:00:00Z" }), days, ET);
   assert.deepEqual([...later.keys()], ["2026-11-08"]);
+  assert.equal(later.get("2026-11-08")?.[0].window, "weekly");
+  // A free plan's monthly window is labelled as such, not as a weekly reset.
+  const monthly = stripEvents(
+    entry(
+      { plan_class: "free", subscription_expires_at: null },
+      {
+        usage: usage({
+          primary_used_percent: 40,
+          primary_window_minutes: 43_200,
+          primary_resets_at: unix("2026-11-06T15:00:00Z"),
+          secondary_used_percent: null,
+          secondary_window_minutes: null,
+          secondary_resets_at: null,
+        }),
+      }
+    ),
+    days,
+    ET
+  );
+  assert.deepEqual(monthly.get("2026-11-06")?.map((event) => [event.kind, event.window]), [["reset", "30d"]]);
 });
 
 test("planEntries keeps the plan's order and drops rows for removed accounts", () => {

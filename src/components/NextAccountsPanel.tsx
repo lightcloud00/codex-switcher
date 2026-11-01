@@ -18,7 +18,6 @@ import {
   stripEvents,
   usageWindows,
   whyText,
-  windowLabel,
   windowUsageText,
   type HeroPick,
   type StripEventKind,
@@ -69,7 +68,7 @@ const HERO: Record<"ready" | "keep", { box: string; eyebrow: string; title: stri
 
 const STRIP_EVENT: Record<StripEventKind, { glyph: string; word: string; className: string }> = {
   back: { glyph: "✓", word: "Back", className: "font-semibold text-emerald-800 dark:text-emerald-300" },
-  reset: { glyph: "↻", word: "Weekly reset", className: "text-gray-700 dark:text-gray-300" },
+  reset: { glyph: "↻", word: "Usage reset", className: "text-gray-700 dark:text-gray-300" },
   ends: { glyph: "✕", word: "Plan ends", className: "font-semibold text-red-800 dark:text-red-300" },
 };
 
@@ -162,7 +161,9 @@ export function NextAccountsPanel({
       )}
 
       {!plan && !planError ? (
-        <p className="py-10 text-center text-base text-gray-600 dark:text-gray-400">Ranking accounts...</p>
+        <p className="py-10 text-center text-base text-gray-600 dark:text-gray-400">
+          {lastChecked(accounts) === null ? "Checking usage..." : "Ranking accounts..."}
+        </p>
       ) : (
         <>
           {(pick.kind === "ready" || pick.kind === "keep") && (
@@ -266,7 +267,6 @@ function EmptyBanner({
 }) {
   return (
     <section
-      role="status"
       aria-labelledby="use-next-empty-heading"
       className="rounded-2xl border-2 border-red-300 bg-red-50 p-6 text-red-950 dark:border-red-800 dark:bg-red-950/60 dark:text-red-50"
     >
@@ -281,15 +281,18 @@ function EmptyBanner({
               <BlurredText blur={blur}>{pick.entry.account.name}</BlurredText> comes back first.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => onOpen(pick.entry.account.id)}
-            disabled={disabled}
-            title="Switch to it now, so Codex works the moment it comes back"
-            className={SECONDARY_BUTTON}
-          >
-            {opening ? "Opening..." : canOpenCodex ? "Switch now" : "Switch"}
-          </button>
+          {/* Already the active account: nothing to switch to, and opening Codex on it would not help yet. */}
+          {!pick.entry.account.is_active && (
+            <button
+              type="button"
+              onClick={() => onOpen(pick.entry.account.id)}
+              disabled={disabled}
+              title="Switch to it now, so Codex works the moment it comes back"
+              className={SECONDARY_BUTTON}
+            >
+              {opening ? "Opening..." : canOpenCodex ? "Switch now" : "Switch"}
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -446,8 +449,8 @@ function AccountRow({
             <span className="text-2xl font-bold">{NONE}</span>
           ) : (
             <>
-              <span className="text-2xl font-bold">{Math.round(row.remaining_percent)}%</span>
-              <span className="ml-1 text-sm">left</span>
+              <span className="text-2xl font-bold">{Math.round(row.remaining_percent)}%</span>{" "}
+              <span className="text-sm">left</span>
             </>
           )}
         </p>
@@ -505,8 +508,8 @@ function AccountDetails({ id, entry, now, blur }: { id: string; entry: UseNextEn
         {windows.length === 0 ? (
           NONE
         ) : (
-          windows.map((window) => (
-            <div key={windowLabel(window.minutes)}>
+          windows.map((window, index) => (
+            <div key={index}>
               {windowUsageText(window)}
               {window.resetsAt !== null && ` · resets ${formatCountdown(window.resetsAt, now)}`}
             </div>
@@ -564,7 +567,7 @@ function WeekStrip({
       <div className="relative mt-3 overflow-x-auto">
         <table className="w-full min-w-[720px] table-fixed border-collapse text-xs">
           <caption className="sr-only">
-            When each Codex account comes back, has its weekly reset, or its plan ends, over the next {days.length} days
+            When each Codex account comes back, has a usage reset, or its plan ends, over the next {days.length} days
           </caption>
           <colgroup>
             <col className="w-44" />
@@ -609,7 +612,9 @@ function WeekStrip({
                     {(events[index].get(day.key) ?? []).map((event) => (
                       <div key={`${event.kind}-${event.at}`} className={`whitespace-nowrap ${STRIP_EVENT[event.kind].className}`}>
                         <span aria-hidden="true">{STRIP_EVENT[event.kind].glyph} </span>
-                        <span className="sr-only">{STRIP_EVENT[event.kind].word} at </span>
+                        <span className="sr-only">
+                          {event.window ? `${event.window} reset` : STRIP_EVENT[event.kind].word} at{" "}
+                        </span>
                         {event.time}
                       </div>
                     ))}
