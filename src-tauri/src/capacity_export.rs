@@ -13,10 +13,10 @@ use crate::{
     api::usage::refresh_all_usage,
     auth::{load_accounts, read_current_auth, reconcile_active_account_with_live_auth},
     commands::{
-        check_codex_processes, load_summary_for_capacity, merge_seats, read_seat_registry,
-        SeatReading,
+        cached_subscription_expiry, check_codex_processes, load_summary_for_capacity, merge_seats,
+        read_seat_registry, SeatReading,
     },
-    types::{AccountsStore, UsageInfo},
+    types::{AccountsStore, StoredAccount, UsageInfo},
 };
 
 const SNAPSHOT_SCHEMA: &str = "aos.capacity-snapshot.v1";
@@ -268,6 +268,242 @@ fn safe_admission(path: Option<&Path>, now: DateTime<Utc>) -> Result<AdmissionPr
     Ok(projection)
 }
 
+/// One Codex account's lane, exactly as the router receives it. `expires` is passed apart from the
+/// account so the Use next tab can hand in the live subscription date the app already holds.
+fn codex_lane(
+    account: &StoredAccount,
+    usage: Option<&UsageInfo>,
+    expires: Option<DateTime<Utc>>,
+    running: bool,
+    admission: &AdmissionProjection,
+    refreshed_at: &str,
+    now: DateTime<Utc>,
+) -> CapacityLane {
+    let alias_hash = account_alias_hash(&account.id);
+    let remaining = usage.and_then(remaining_percent);
+    let reset_at = usage
+        .and_then(later_reset)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    let lease_valid = admission
+        .lease_valid_by_alias_hash
+        .get(&alias_hash)
+        .copied()
+        .unwrap_or(false);
+    let availability_reason = if usage.is_none() {
+        "usage_unavailable"
+    } else if usage.is_some_and(|value| value.error.is_some()) {
+        "usage_refresh_failed"
+    } else if expires.is_some_and(|value| value <= now) {
+        "subscription_expired"
+    } else if remaining.is_some_and(|value| value <= 0.0) {
+        "allowance_exhausted"
+    } else if running {
+        "lane_running"
+    } else if !admission.host_admitted {
+        "host_not_admitted"
+    } else if !lease_valid {
+        "seat_lease_required"
+    } else {
+        "available"
+    };
+    CapacityLane {
+        lane_id: format!("codex-seat-{}", &alias_hash[7..23]),
+        account_alias_hash: alias_hash,
+        family: "codex-spark",
+        model: "gpt-5.3-codex-spark",
+        task_classes: ["implementation", "test", "refactor"],
+        plan_class: safe_plan_class(
+            usage
+                .and_then(|value| value.plan_type.clone())
+                .or_else(|| account.plan_type.clone()),
+        ),
+        remaining_percent: remaining,
+        reset_at,
+        subscription_expires_at: expires
+            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        running,
+        lease_valid,
+        refreshed_at: refreshed_at.to_string(),
+        local_read_only: false,
+        availability_reason: availability_reason.to_string(),
+    }
+}
+
+const USE_NEXT_SCHEMA: &str = "codex-switcher.use-next.v1";
+/// The order `router_plan` gives Codex lanes, named so the tab can say which rule it follows.
+const USE_NEXT_RULE: &str = "router_plan_codex_order_then_soonest_back";
+
+/// One row of the Use next tab: the lane the router sees, plus the account it belongs to and its place.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UseNextRow {
+    /// 1 is the account to use next.
+    pub position: usize,
+    pub account_id: String,
+    pub lane_id: String,
+    /// clean, busy, exhausted, expired, refresh_failed or no_usage.
+    pub status: &'static str,
+    /// The exporter's reason, e.g. host_not_admitted on a lane that is clean for a manual switch.
+    pub availability_reason: String,
+    pub plan_class: String,
+    pub remaining_percent: Option<f64>,
+    /// When an exhausted lane's empty window resets; null for every other status.
+    pub back_at: Option<String>,
+    pub subscription_expires_at: Option<String>,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UseNextPlan {
+    pub schema: &'static str,
+    pub observed_at: String,
+    pub selection_rule: &'static str,
+    pub rows: Vec<UseNextRow>,
+}
+
+/// A manual switch has no host admission or seat lease, so lanes held back only by those still count
+/// as clean here; every other exporter reason keeps its own status.
+fn use_next_status(reason: &str) -> &'static str {
+    match reason {
+        "available" | "host_not_admitted" | "seat_lease_required" => "clean",
+        "lane_running" => "busy",
+        "allowance_exhausted" => "exhausted",
+        "subscription_expired" => "expired",
+        "usage_refresh_failed" => "refresh_failed",
+        _ => "no_usage",
+    }
+}
+
+/// The reset of whichever window is used up; the later one when both are.
+fn back_at(usage: &UsageInfo) -> Option<DateTime<Utc>> {
+    [
+        (usage.primary_used_percent, usage.primary_resets_at),
+        (usage.secondary_used_percent, usage.secondary_resets_at),
+    ]
+    .into_iter()
+    .filter(|(used, _)| used.is_some_and(|value| value >= 100.0))
+    .filter_map(|(_, reset)| unix_time(reset))
+    .max()
+}
+
+fn timestamp(value: Option<&str>) -> Option<i64> {
+    value
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|time| time.timestamp())
+}
+
+/// Clean lanes come first in the order `router_plan` dispatches Codex lanes: they all share one family and
+/// the MCP passes no outcome history, so `rank_lanes` falls through to the soonest subscription end
+/// (none last), then the lane id. The lanes it would not dispatch follow: the busy active account, then
+/// exhausted lanes soonest back, then failed or missing usage readings, then expired subscriptions.
+fn rank_use_next(mut rows: Vec<UseNextRow>) -> Vec<UseNextRow> {
+    fn group(status: &str) -> u8 {
+        match status {
+            "clean" => 0,
+            "busy" => 1,
+            "exhausted" => 2,
+            "refresh_failed" | "no_usage" => 3,
+            _ => 4,
+        }
+    }
+    let key = |row: &UseNextRow| {
+        let expires = timestamp(row.subscription_expires_at.as_deref());
+        let within_group = match row.status {
+            "exhausted" => timestamp(row.back_at.as_deref()).unwrap_or(i64::MAX),
+            // Most recently ended first: it is the likeliest to have been renewed.
+            "expired" => expires.map_or(i64::MAX, |value| -value),
+            _ => expires.unwrap_or(i64::MAX),
+        };
+        (group(row.status), within_group, row.lane_id.clone())
+    };
+    rows.sort_by_key(key);
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.position = index + 1;
+    }
+    rows
+}
+
+/// `live_expiry` holds the subscription dates the app read from the account API this session; an
+/// account it does not cover keeps its saved date, which is the one the exporter hands the router.
+fn build_use_next_plan(
+    store: &AccountsStore,
+    usage_rows: &[UsageInfo],
+    codex_running: bool,
+    live_expiry: &HashMap<String, Option<DateTime<Utc>>>,
+    now: DateTime<Utc>,
+) -> UseNextPlan {
+    let usage_by_id: HashMap<&str, &UsageInfo> = usage_rows
+        .iter()
+        .map(|usage| (usage.account_id.as_str(), usage))
+        .collect();
+    let observed_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // The app holds no admission receipt, so every lane carries the router's host gate.
+    let admission = safe_admission(None, now).expect("no receipt path never fails");
+    let rows = store
+        .accounts
+        .iter()
+        .map(|account| {
+            let usage = usage_by_id.get(account.id.as_str()).copied();
+            let expires = live_expiry
+                .get(&account.id)
+                .copied()
+                .unwrap_or(account.subscription_expires_at);
+            let running =
+                codex_running && store.active_account_id.as_deref() == Some(account.id.as_str());
+            let lane = codex_lane(
+                account,
+                usage,
+                expires,
+                running,
+                &admission,
+                &observed_at,
+                now,
+            );
+            let status = use_next_status(&lane.availability_reason);
+            UseNextRow {
+                position: 0,
+                account_id: account.id.clone(),
+                lane_id: lane.lane_id,
+                status,
+                availability_reason: lane.availability_reason,
+                plan_class: lane.plan_class,
+                remaining_percent: lane.remaining_percent,
+                back_at: (status == "exhausted")
+                    .then(|| usage.and_then(back_at))
+                    .flatten()
+                    .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                subscription_expires_at: lane.subscription_expires_at,
+                running,
+            }
+        })
+        .collect();
+    UseNextPlan {
+        schema: USE_NEXT_SCHEMA,
+        observed_at,
+        selection_rule: USE_NEXT_RULE,
+        rows: rank_use_next(rows),
+    }
+}
+
+/// The Use next tab's plan from the usage readings the window already holds. Accounts and the running
+/// check are read the way the exporter reads them, so each lane matches what `capacity_list` shows.
+pub async fn use_next_plan(usage_rows: &[UsageInfo]) -> Result<UseNextPlan> {
+    let mut store = load_accounts().context("accounts_unavailable")?;
+    if let Ok(Some(auth)) = read_current_auth() {
+        reconcile_active_account_with_live_auth(&mut store, &auth);
+    }
+    let process = check_codex_processes()
+        .await
+        .map_err(|_| anyhow::anyhow!("codex_process_probe_failed"))?;
+    let live_expiry = cached_subscription_expiry();
+    Ok(build_use_next_plan(
+        &store,
+        usage_rows,
+        process.count > 0,
+        &live_expiry,
+        Utc::now(),
+    ))
+}
+
 #[cfg(test)]
 fn build_snapshot(
     store: &AccountsStore,
@@ -294,58 +530,17 @@ fn build_snapshot_with_claude(
     let refreshed_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut lanes = Vec::with_capacity(store.accounts.len());
     for account in &store.accounts {
-        let alias_hash = account_alias_hash(&account.id);
-        let usage = usage_by_id.get(account.id.as_str()).copied();
-        let remaining = usage.and_then(|value| remaining_percent(value));
-        let reset_at = usage
-            .and_then(|value| later_reset(value))
-            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        let expires = account.subscription_expires_at;
         let running =
             codex_running && store.active_account_id.as_deref() == Some(account.id.as_str());
-        let lease_valid = admission
-            .lease_valid_by_alias_hash
-            .get(&alias_hash)
-            .copied()
-            .unwrap_or(false);
-        let availability_reason = if usage.is_none() {
-            "usage_unavailable"
-        } else if usage.is_some_and(|value| value.error.is_some()) {
-            "usage_refresh_failed"
-        } else if expires.is_some_and(|value| value <= now) {
-            "subscription_expired"
-        } else if remaining.is_some_and(|value| value <= 0.0) {
-            "allowance_exhausted"
-        } else if running {
-            "lane_running"
-        } else if !admission.host_admitted {
-            "host_not_admitted"
-        } else if !lease_valid {
-            "seat_lease_required"
-        } else {
-            "available"
-        };
-        lanes.push(CapacityLane {
-            lane_id: format!("codex-seat-{}", &alias_hash[7..23]),
-            account_alias_hash: alias_hash,
-            family: "codex-spark",
-            model: "gpt-5.3-codex-spark",
-            task_classes: ["implementation", "test", "refactor"],
-            plan_class: safe_plan_class(
-                usage
-                    .and_then(|value| value.plan_type.clone())
-                    .or_else(|| account.plan_type.clone()),
-            ),
-            remaining_percent: remaining,
-            reset_at,
-            subscription_expires_at: expires
-                .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        lanes.push(codex_lane(
+            account,
+            usage_by_id.get(account.id.as_str()).copied(),
+            account.subscription_expires_at,
             running,
-            lease_valid,
-            refreshed_at: refreshed_at.clone(),
-            local_read_only: false,
-            availability_reason: availability_reason.to_string(),
-        });
+            admission,
+            &refreshed_at,
+            now,
+        ));
     }
     lanes.sort_by(|left, right| left.lane_id.cmp(&right.lane_id));
     let body = CapacityBody {
@@ -700,6 +895,236 @@ mod tests {
             "claude-usage",
             "private",
         ] {
+            assert!(!rendered.contains(forbidden), "{forbidden} leaked");
+        }
+    }
+
+    fn use_next_account(name: &str, expires: Option<DateTime<Utc>>) -> StoredAccount {
+        let mut account = StoredAccount::new_chatgpt(
+            name.to_string(),
+            Some(format!("{name}@example.com")),
+            Some("pro".to_string()),
+            None,
+            "private-id-token".to_string(),
+            "private-access-token".to_string(),
+            "private-refresh-token".to_string(),
+            None,
+        );
+        account.subscription_expires_at = expires;
+        account
+    }
+
+    fn use_next_usage(account: &StoredAccount, five_hour: f64, weekly: f64) -> UsageInfo {
+        UsageInfo {
+            account_id: account.id.clone(),
+            plan_type: Some("pro".to_string()),
+            primary_used_percent: Some(five_hour),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(1_800_003_600),
+            secondary_used_percent: Some(weekly),
+            secondary_window_minutes: Some(10_080),
+            secondary_resets_at: Some(1_800_300_000),
+            has_credits: Some(false),
+            unlimited_credits: Some(false),
+            credits_balance: None,
+            error: None,
+        }
+    }
+
+    fn use_next_now() -> DateTime<Utc> {
+        Utc.timestamp_opt(1_800_000_000, 0).single().unwrap()
+    }
+
+    fn store_of(accounts: Vec<StoredAccount>, active: Option<&str>) -> AccountsStore {
+        AccountsStore {
+            version: 1,
+            accounts,
+            active_account_id: active.map(str::to_string),
+            masked_account_ids: Vec::new(),
+        }
+    }
+
+    fn names_in_order<'a>(plan: &UseNextPlan, store: &'a AccountsStore) -> Vec<&'a str> {
+        plan.rows
+            .iter()
+            .map(|row| {
+                store
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == row.account_id)
+                    .map(|account| account.name.as_str())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn use_next_orders_clean_lanes_the_way_the_router_does() {
+        let now = use_next_now();
+        let late = use_next_account("late", Some(now + Duration::days(30)));
+        let soon = use_next_account("soon", Some(now + Duration::days(5)));
+        let open = use_next_account("open", None);
+        let twin_a = use_next_account("twin-a", Some(now + Duration::days(9)));
+        let twin_b = use_next_account("twin-b", Some(now + Duration::days(9)));
+        let usage: Vec<UsageInfo> = [&late, &soon, &open, &twin_a, &twin_b]
+            .iter()
+            .map(|account| use_next_usage(account, 10.0, 20.0))
+            .collect();
+        let store = store_of(vec![late, soon, open, twin_a, twin_b], None);
+        let plan = build_use_next_plan(&store, &usage, false, &HashMap::new(), now);
+
+        assert!(plan.rows.iter().all(|row| row.status == "clean"));
+        // The app has no admission receipt, so the router's host gate shows on every clean lane.
+        assert!(plan
+            .rows
+            .iter()
+            .all(|row| row.availability_reason == "host_not_admitted"));
+        let names = names_in_order(&plan, &store);
+        assert_eq!(names[0], "soon");
+        // Equal end dates fall back to the lane id, as rank_lanes does.
+        let twins: Vec<&UseNextRow> = plan.rows[1..3].iter().collect();
+        assert!(twins[0].lane_id < twins[1].lane_id);
+        assert_eq!(&names[3..], ["late", "open"]);
+        assert_eq!(
+            plan.rows.iter().map(|row| row.position).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn use_next_lists_held_back_lanes_after_the_clean_ones() {
+        let now = use_next_now();
+        let ends = Some(now + Duration::days(20));
+        let active = use_next_account("active", ends);
+        let clean = use_next_account("clean", Some(now + Duration::days(40)));
+        let weekly_out = use_next_account("weekly-out", ends);
+        let five_hour_out = use_next_account("five-hour-out", ends);
+        let failed = use_next_account("failed", Some(now + Duration::days(2)));
+        let unread = use_next_account("unread", ends);
+        let old = use_next_account("old", Some(now - Duration::days(60)));
+        let recent = use_next_account("recent", Some(now - Duration::days(1)));
+
+        let mut failed_usage = use_next_usage(&failed, 0.0, 0.0);
+        failed_usage.error = Some("401".to_string());
+        let usage = vec![
+            use_next_usage(&active, 30.0, 14.0),
+            use_next_usage(&clean, 0.0, 0.0),
+            use_next_usage(&weekly_out, 10.0, 100.0),
+            use_next_usage(&five_hour_out, 100.0, 50.0),
+            failed_usage,
+            use_next_usage(&old, 0.0, 0.0),
+            use_next_usage(&recent, 0.0, 0.0),
+        ];
+        let active_id = active.id.clone();
+        let store = store_of(
+            vec![
+                recent,
+                old,
+                unread,
+                failed,
+                five_hour_out,
+                weekly_out,
+                clean,
+                active,
+            ],
+            Some(&active_id),
+        );
+        let plan = build_use_next_plan(&store, &usage, true, &HashMap::new(), now);
+
+        assert_eq!(
+            names_in_order(&plan, &store),
+            [
+                "clean",
+                "active",
+                "five-hour-out",
+                "weekly-out",
+                "failed",
+                "unread",
+                "recent",
+                "old"
+            ]
+        );
+        let statuses: Vec<&str> = plan.rows.iter().map(|row| row.status).collect();
+        assert_eq!(
+            statuses,
+            [
+                "clean",
+                "busy",
+                "exhausted",
+                "exhausted",
+                "refresh_failed",
+                "no_usage",
+                "expired",
+                "expired"
+            ]
+        );
+        assert!(plan.rows[1].running);
+        // An exhausted lane comes back when its empty window resets, not at the later of the two.
+        assert_eq!(
+            plan.rows[2].back_at.as_deref(),
+            Some("2027-01-15T09:00:00Z")
+        );
+        assert_eq!(
+            plan.rows[3].back_at.as_deref(),
+            Some("2027-01-18T19:20:00Z")
+        );
+        assert!(plan
+            .rows
+            .iter()
+            .filter(|row| row.status != "exhausted")
+            .all(|row| row.back_at.is_none()));
+    }
+
+    #[test]
+    fn use_next_prefers_the_live_subscription_date_over_the_saved_one() {
+        let now = use_next_now();
+        let renewed = use_next_account("renewed", Some(now - Duration::days(3)));
+        let usage = vec![use_next_usage(&renewed, 0.0, 0.0)];
+        let live = HashMap::from([(renewed.id.clone(), Some(now + Duration::days(27)))]);
+        let store = store_of(vec![renewed], None);
+
+        let saved = build_use_next_plan(&store, &usage, false, &HashMap::new(), now);
+        assert_eq!(saved.rows[0].status, "expired");
+        let refreshed = build_use_next_plan(&store, &usage, false, &live, now);
+        assert_eq!(refreshed.rows[0].status, "clean");
+        assert_eq!(
+            refreshed.rows[0].subscription_expires_at.as_deref(),
+            Some("2027-02-11T08:00:00Z")
+        );
+    }
+
+    #[test]
+    fn use_next_lanes_match_the_exported_lanes() {
+        let now = use_next_now();
+        let account = use_next_account("same", Some(now + Duration::days(8)));
+        let usage = vec![use_next_usage(&account, 20.0, 30.0)];
+        let store = store_of(vec![account], None);
+        let admission = safe_admission(None, now).unwrap();
+        let snapshot = build_snapshot(&store, &usage, false, &admission, now).unwrap();
+        let plan = build_use_next_plan(&store, &usage, false, &HashMap::new(), now);
+        let (lane, row) = (&snapshot.lanes[0], &plan.rows[0]);
+        assert_eq!(row.lane_id, lane.lane_id);
+        assert_eq!(row.availability_reason, lane.availability_reason);
+        assert_eq!(row.remaining_percent, lane.remaining_percent);
+        assert_eq!(row.subscription_expires_at, lane.subscription_expires_at);
+        assert_eq!(row.plan_class, lane.plan_class);
+    }
+
+    #[test]
+    fn use_next_plan_never_serializes_credentials_or_identity() {
+        let now = use_next_now();
+        let account = use_next_account("private name", None);
+        let usage = vec![use_next_usage(&account, 1.0, 1.0)];
+        let store = store_of(vec![account], None);
+        let rendered = serde_json::to_string(&build_use_next_plan(
+            &store,
+            &usage,
+            false,
+            &HashMap::new(),
+            now,
+        ))
+        .unwrap();
+        for forbidden in ["private", "example.com", "@", "token"] {
             assert!(!rendered.contains(forbidden), "{forbidden} leaked");
         }
     }

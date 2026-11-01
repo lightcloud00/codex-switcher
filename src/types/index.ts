@@ -102,6 +102,34 @@ export interface OAuthLoginInfo {
 export interface AccountWithUsage extends AccountInfo {
   usage?: UsageInfo;
   usageLoading?: boolean;
+  /** When `usage` last came back (ms since epoch), error readings included. */
+  usageCheckedAt?: number;
+}
+
+/** clean: free to switch to; busy: the active account while Codex runs; the rest are held back. */
+export type UseNextStatus = "clean" | "busy" | "exhausted" | "expired" | "refresh_failed" | "no_usage";
+
+/** One row of get_use_next_plan, already in the order to use the accounts. */
+export interface UseNextRow {
+  position: number;
+  account_id: string;
+  lane_id: string;
+  status: UseNextStatus;
+  /** The exporter's reason, e.g. host_not_admitted on a lane that is clean for a manual switch. */
+  availability_reason: string;
+  plan_class: string;
+  remaining_percent: number | null;
+  /** When an exhausted lane's empty window resets. */
+  back_at: string | null;
+  subscription_expires_at: string | null;
+  running: boolean;
+}
+
+export interface UseNextPlan {
+  schema: string;
+  observed_at: string;
+  selection_rule: string;
+  rows: UseNextRow[];
 }
 
 export interface CodexProcessInfo {
