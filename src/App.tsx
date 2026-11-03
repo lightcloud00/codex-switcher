@@ -2,6 +2,7 @@ import { ProviderAccessPanel } from "./components/ProviderAccessPanel";
 import { ApiCreditsPanel } from "./components/ApiCreditsPanel";
 import { OverviewPanel } from "./components/OverviewPanel";
 import { NextAccountsPanel } from "./components/NextAccountsPanel";
+import { ShowWeekGuide } from "./components/ShowWeekGuide";
 import { isCodexAccountInactive } from "./lib/overview";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAccounts } from "./hooks/useAccounts";
@@ -1895,6 +1896,7 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
+        <ShowWeekGuide masked={allMasked} />
         {view === "overview" ? (
           <OverviewPanel
             accounts={accounts}
