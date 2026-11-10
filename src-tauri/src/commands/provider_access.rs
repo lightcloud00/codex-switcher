@@ -3,13 +3,21 @@ use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlanDates {
     pub id: String,
     pub billing_renews_on: Option<String>,
     pub credit_expires_on: Option<String>,
     pub credential_expires_on: Option<String>,
+    #[serde(default)]
+    pub subscription_expires_on: Option<String>,
+    #[serde(default)]
+    pub billing_interval: Option<String>,
+    #[serde(default)]
+    pub evidence_source: Option<String>,
+    #[serde(default)]
+    pub last_verified_on: Option<String>,
 }
 const PLAN_IDS: &[&str] = &[
     "x-subscription",
@@ -26,11 +34,22 @@ const PLAN_IDS: &[&str] = &[
     "treg-api",
     "minimax-lightcloud007",
 ];
+pub(crate) fn metadata_dir() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    {
+        return crate::auth::test_support::home_dir()
+            .map(|p| p.join("metadata"))
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(test))]
+    {
+        Ok(dirs::config_dir()
+            .ok_or("config directory unavailable")?
+            .join("codex-switcher"))
+    }
+}
 fn dates_path() -> Result<PathBuf, String> {
-    Ok(dirs::config_dir()
-        .ok_or("config directory unavailable")?
-        .join("codex-switcher")
-        .join("provider-dates.json"))
+    Ok(metadata_dir()?.join("provider-dates.json"))
 }
 fn validate(plans: &[PlanDates]) -> Result<(), String> {
     if plans.len() > PLAN_IDS.len() {
@@ -41,10 +60,24 @@ fn validate(plans: &[PlanDates]) -> Result<(), String> {
         if !PLAN_IDS.contains(&p.id.as_str()) || !seen.insert(&p.id) {
             return Err("Unknown or duplicate plan".into());
         }
+        if p.billing_interval
+            .as_deref()
+            .is_some_and(|v| !["unknown", "monthly", "annual", "none"].contains(&v))
+        {
+            return Err("Unknown billing interval".into());
+        }
+        if p.evidence_source
+            .as_ref()
+            .is_some_and(|v| v.len() > 160 || v.chars().any(char::is_control))
+        {
+            return Err("Evidence source must be a short single line".into());
+        }
         for value in [
             &p.billing_renews_on,
             &p.credit_expires_on,
             &p.credential_expires_on,
+            &p.subscription_expires_on,
+            &p.last_verified_on,
         ]
         .into_iter()
         .flatten()
@@ -69,6 +102,7 @@ fn with_missing_plans(mut rows: Vec<PlanDates>) -> Vec<PlanDates> {
                 billing_renews_on: None,
                 credit_expires_on: None,
                 credential_expires_on: None,
+                ..Default::default()
             });
         }
     }
@@ -89,6 +123,7 @@ fn read_dates() -> Result<Vec<PlanDates>, String> {
                 billing_renews_on: None,
                 credit_expires_on: None,
                 credential_expires_on: None,
+                ..Default::default()
             })
             .collect()),
         Err(_) => Err("Could not read provider dates".into()),
@@ -337,29 +372,37 @@ pub async fn get_provider_access() -> Result<serde_json::Value, String> {
 pub async fn check_provider_sign_in() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "providers": provider_rows(true).await }))
 }
-#[tauri::command]
-pub async fn save_provider_dates(plans: Vec<PlanDates>) -> Result<(), String> {
-    validate(&plans)?;
+static DATE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn write_dates(plans: &[PlanDates]) -> Result<(), String> {
+    validate(plans)?;
     let path = dates_path()?;
     std::fs::create_dir_all(path.parent().ok_or("Invalid config path")?)
         .map_err(|_| "Could not create config directory")?;
-    // Write a complete validated snapshot before replacing the previous dates.
-    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&plans).map_err(|_| "Could not encode dates")?,
-    )
-    .map_err(|_| "Could not save dates")?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::copy(&tmp, &path).map_err(|_| "Could not update dates")?;
-        std::fs::remove_file(&tmp).ok();
-    } else {
-        std::fs::rename(&tmp, &path).map_err(|_| "Could not update dates")?;
-    }
-    #[cfg(not(windows))]
-    std::fs::rename(&tmp, &path).map_err(|_| "Could not update dates")?;
-    Ok(())
+    let bytes = serde_json::to_vec_pretty(plans).map_err(|_| "Could not encode dates")?;
+    crate::auth::storage::atomic_write_private(&path, &bytes, 0)
+        .map_err(|_| "Could not save dates".into())
+}
+#[tauri::command]
+pub async fn save_provider_dates(plans: Vec<PlanDates>) -> Result<(), String> {
+    let _lock = DATE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "Date update unavailable")?;
+    write_dates(&plans)
+}
+/// Update just the chosen account, preserving dates for every other provider.
+#[tauri::command]
+pub async fn update_provider_plan(plan: PlanDates) -> Result<(), String> {
+    let _lock = DATE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "Date update unavailable")?;
+    validate(std::slice::from_ref(&plan))?;
+    let mut plans = read_dates()?;
+    let row = plans
+        .iter_mut()
+        .find(|row| row.id == plan.id)
+        .ok_or("Unknown plan")?;
+    *row = plan;
+    write_dates(&plans)
 }
 /// Fixed provider ids only: never accepts a user command, arguments, or a credential.
 #[tauri::command]
@@ -458,8 +501,66 @@ mod tests {
             billing_renews_on: Some(date.into()),
             credit_expires_on: None,
             credential_expires_on: None,
+            ..Default::default()
         }
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_updates_round_trip_and_preserve_other_accounts() {
+        let _home = crate::auth::test_support::TestHome::new();
+        save_provider_dates(vec![
+            plan("claude-mac-main", "2026-12-03"),
+            plan("x-subscription", "2026-11-20"),
+        ])
+        .await
+        .unwrap();
+        let mut row = plan("claude-mac-main", "2027-12-03");
+        row.billing_interval = Some("annual".into());
+        row.evidence_source = Some("Billing page".into());
+        row.last_verified_on = Some("2026-11-10".into());
+        update_provider_plan(row).await.unwrap();
+        let saved = read_dates().unwrap();
+        assert_eq!(
+            saved
+                .iter()
+                .find(|p| p.id == "x-subscription")
+                .unwrap()
+                .billing_renews_on
+                .as_deref(),
+            Some("2026-11-20")
+        );
+        assert_eq!(
+            saved
+                .iter()
+                .find(|p| p.id == "claude-mac-main")
+                .unwrap()
+                .billing_interval
+                .as_deref(),
+            Some("annual")
+        );
+        assert!(update_provider_plan(plan("bad", "2026-12-03"))
+            .await
+            .is_err());
+        assert_eq!(read_dates().unwrap().len(), saved.len());
+    }
+
+    #[test]
+    fn metadata_is_optional_and_validates_interval_evidence_and_dates() {
+        let mut row = plan("claude-mac-main", "2026-12-03");
+        row.billing_interval = Some("annual".into());
+        row.subscription_expires_on = Some("2027-12-03".into());
+        row.evidence_source = Some("Billing page".into());
+        row.last_verified_on = Some("2026-11-10".into());
+        assert!(validate(&[row.clone()]).is_ok());
+        row.billing_interval = Some("invented".into());
+        assert!(validate(&[row.clone()]).is_err());
+        row.billing_interval = None;
+        row.last_verified_on = Some("2026-02-30".into());
+        assert!(validate(&[row.clone()]).is_err());
+        row.last_verified_on = None;
+        row.evidence_source = Some("line\nbreak".into());
+        assert!(validate(&[row]).is_err());
+    }
+
     #[test]
     fn dates_reject_injection_invalid_calendar_and_unknown_fields() {
         assert!(validate(&[plan("x-subscription", "2026-11-13")]).is_ok());
@@ -483,7 +584,14 @@ mod tests {
         let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(rows.len(), PLAN_IDS.len());
         assert_eq!(ids[0], "x-subscription");
-        for id in ["deepseek-api", "fireworks-api", "kimi-api", "openrouter-api", "treg-api", "minimax-lightcloud007"] {
+        for id in [
+            "deepseek-api",
+            "fireworks-api",
+            "kimi-api",
+            "openrouter-api",
+            "treg-api",
+            "minimax-lightcloud007",
+        ] {
             assert!(ids.contains(&id), "{id}");
         }
         assert_eq!(rows[0].billing_renews_on.as_deref(), Some("2026-11-13"));

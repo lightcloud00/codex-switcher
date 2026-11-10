@@ -10,15 +10,16 @@ import { useNextPlan } from "./hooks/useNextPlan";
 import { heroPick, planEntries, trayUseNext } from "./lib/nextAccounts";
 import { useDesktopReopen } from "./hooks/useDesktopReopen";
 import { useCodexClosePreference } from "./hooks/useCodexClosePreference";
+import { SessionRecoveryPanel } from "./components/SessionRecoveryPanel";
 import { SettingsModal } from "./components/SettingsModal";
+import { BackupPasswordModal } from "./components/BackupPasswordModal";
 import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, ClaudeUsagePanel, WindowResizeBorders } from "./components";
-import type { AccountInfo, AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
+import type { AccountInfo, AccountWithUsage, CodexProcessInfo, DockDisplayMode, ImportAccountsSummary, UsageInfo } from "./types";
 import {
-  exportFullBackupFile,
-  importFullBackupFile,
+  canUseBackupFiles,
   isTauriRuntime,
   invokeBackend,
 } from "./lib/platform";
@@ -50,6 +51,7 @@ import {
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import { getTauriWindow } from "./lib/tauriWindow";
+import { readAutoResumeSessions, writeAutoResumeSessions, type RecoveryState, type RecoveryProgress, type RecoveryReport } from "./lib/sessionRecovery";
 import "./App.css";
 
 type AppView = "overview" | "next" | "codex" | "claude" | "providers";
@@ -232,8 +234,6 @@ function App() {
     deleteAccount,
     renameAccount,
     importFromFile,
-    exportAccountsSlimText,
-    importAccountsSlimText,
     startOAuthLogin,
     completeOAuthLogin,
     cancelOAuthLogin,
@@ -243,13 +243,7 @@ function App() {
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [reloginAccount, setReloginAccount] = useState<AccountInfo | null>(null);
-  const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
-  const [configModalMode, setConfigModalMode] = useState<"slim_export" | "slim_import">(
-    "slim_export"
-  );
-  const [configPayload, setConfigPayload] = useState("");
-  const [configModalError, setConfigModalError] = useState<string | null>(null);
-  const [configCopied, setConfigCopied] = useState(false);
+  const [backupMode, setBackupMode] = useState<"export" | "import" | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [view, setView] = useState<AppView>(readStoredView);
   const selectView = useCallback((next: AppView) => {
@@ -269,10 +263,6 @@ function App() {
   const [pendingSwitchAccountId, setPendingSwitchAccountId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOpeningCodex, setIsOpeningCodex] = useState(false);
-  const [isExportingSlim, setIsExportingSlim] = useState(false);
-  const [isImportingSlim, setIsImportingSlim] = useState(false);
-  const [isExportingFull, setIsExportingFull] = useState(false);
-  const [isImportingFull, setIsImportingFull] = useState(false);
   const [isWarmingAll, setIsWarmingAll] = useState(false);
   const [warmingUpId, setWarmingUpId] = useState<string | null>(null);
   const [refreshSuccess, setRefreshSuccess] = useState(false);
@@ -315,6 +305,8 @@ function App() {
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [autoResumeSessions, setAutoResumeSessions] = useState(() => readAutoResumeSessions());
+  const [recoveryState, setRecoveryState] = useState<RecoveryState | null>(null);
   const [isCompletingForceClose, setIsCompletingForceClose] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forceCloseInFlightRef = useRef(false);
@@ -834,13 +826,27 @@ function App() {
     [closeBehaviorDontAskAgain, formatWarmupError, showWarmupToast]
   );
 
+  const saveAutoResumeSessions = (enabled: boolean) => {
+    try {
+      writeAutoResumeSessions(enabled);
+      setAutoResumeSessions(enabled);
+    } catch (err) {
+      showWarmupToast(`Could not save auto-resume preference: ${formatWarmupError(err)}`, true);
+    }
+  };
+
   const handleForceCloseConfirm = async () => {
     if (forceCloseInFlightRef.current || desktopReopen.checking) return;
     forceCloseInFlightRef.current = true;
     const accountId = pendingSwitchAccountId;
     const shouldReopen = desktopReopen.available && desktopReopen.reopen;
+    let preparedRecoveryCount = 0;
+    let reopened = false;
     setIsCompletingForceClose(true);
     try {
+      if (accountId && autoResumeSessions && shouldReopen) {
+        preparedRecoveryCount = await invokeBackend<number>("prepare_codex_session_recovery");
+      }
       try {
         desktopReopen.rememberSelection();
       } catch (err) {
@@ -852,7 +858,12 @@ function App() {
         showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
       }
       const result = await closeCodexProcesses(shouldReopen, codexClose.forceClose);
-      if (!result?.processInfo?.can_switch) return;
+      if (!result?.processInfo?.can_switch) {
+        if (preparedRecoveryCount > 0) {
+          await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
+        }
+        return;
+      }
 
       await finishForceClose(
         { canSwitch: true, reopenToken: result.reopenToken },
@@ -864,16 +875,40 @@ function App() {
         async (token) => {
           try {
             await invokeBackend("reopen_closed_codex_desktop", { token });
+            reopened = true;
             showWarmupToast(accountId ? "Account switched. Codex desktop reopened." : "Codex desktop reopened.");
           } catch (err) {
             showWarmupToast(`Codex closed${accountId ? " and account switched" : ""}, but reopening failed: ${formatWarmupError(err)}`, true);
           }
         },
       );
+      if (preparedRecoveryCount > 0 && reopened) {
+        setRecoveryState({ status: "running", progress: { completed: 0, total: preparedRecoveryCount, current_session_id: null } });
+        let acceptingProgress = true;
+        try {
+          const { Channel } = await import("@tauri-apps/api/core");
+          const onProgress = new Channel<RecoveryProgress>((progress) => {
+            if (acceptingProgress) setRecoveryState({ status: "running", progress });
+          });
+          const report = await invokeBackend<RecoveryReport>("resume_codex_session_recovery", { onProgress });
+          acceptingProgress = false;
+          setRecoveryState({ status: "complete", report });
+        } catch (err) {
+          acceptingProgress = false;
+          setRecoveryState({ status: "error", message: `Account switched, but auto-resume failed: ${formatWarmupError(err)}` });
+        }
+      } else if (preparedRecoveryCount > 0) {
+        await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
+      } else if (accountId && autoResumeSessions && reopened) {
+        setRecoveryState({ status: "complete", report: { resumed: [], skipped: [], failed: [], timed_out: false } });
+      }
       if (shouldReopen && !result.reopenToken) {
         showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);
       }
     } catch (err) {
+      if (preparedRecoveryCount > 0) {
+        await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
+      }
       console.error("Failed to switch account after closing Codex:", err);
       showWarmupToast(`Switch failed after closing Codex: ${formatWarmupError(err)}`, true);
     } finally {
@@ -1200,93 +1235,22 @@ function App() {
     return `Timed: ${upcoming ?? timedWarmupTimes[0]}`;
   }, [timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes]);
 
-  const handleExportSlimText = async () => {
-    setConfigModalMode("slim_export");
-    setConfigModalError(null);
-    setConfigPayload("");
-    setConfigCopied(false);
-    setIsConfigModalOpen(true);
-
-    try {
-      setIsExportingSlim(true);
-      const payload = await exportAccountsSlimText();
-      setConfigPayload(payload);
-      showWarmupToast(`Slim text exported (${accounts.length} accounts).`);
-    } catch (err) {
-      console.error("Failed to export slim text:", err);
-      const message = err instanceof Error ? err.message : String(err);
-      setConfigModalError(message);
-      showWarmupToast("Slim export failed", true);
-    } finally {
-      setIsExportingSlim(false);
-    }
+  const handleBackupExported = () => {
+    setBackupMode(null);
+    showWarmupToast(isTauriRuntime() ? "Password-protected backup saved." : "Backup download started.");
   };
 
-  const openImportSlimTextModal = () => {
-    setConfigModalMode("slim_import");
-    setConfigModalError(null);
-    setConfigPayload("");
-    setConfigCopied(false);
-    setIsConfigModalOpen(true);
-  };
-
-  const handleImportSlimText = async () => {
-    if (!configPayload.trim()) {
-      setConfigModalError("Please paste the slim text string first.");
-      return;
-    }
-
-    try {
-      setIsImportingSlim(true);
-      setConfigModalError(null);
-      const summary = await importAccountsSlimText(configPayload);
-      setMaskedAccounts(new Set());
-      setIsConfigModalOpen(false);
-      showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
-      );
-    } catch (err) {
-      console.error("Failed to import slim text:", err);
-      const message = err instanceof Error ? err.message : String(err);
-      setConfigModalError(message);
-      showWarmupToast("Slim import failed", true);
-    } finally {
-      setIsImportingSlim(false);
-    }
-  };
-
-  const handleExportFullFile = async () => {
-    try {
-      setIsExportingFull(true);
-      const exported = await exportFullBackupFile();
-      if (!exported) return;
-      showWarmupToast("Full encrypted file exported.");
-    } catch (err) {
-      console.error("Failed to export full encrypted file:", err);
-      showWarmupToast("Full export failed", true);
-    } finally {
-      setIsExportingFull(false);
-    }
-  };
-
-  const handleImportFullFile = async () => {
-    try {
-      setIsImportingFull(true);
-      const summary = await importFullBackupFile();
-      if (!summary) return;
-      const accountList = await loadAccounts();
-      await refreshUsage(accountList);
+  const handleBackupRestored = (summary: ImportAccountsSummary) => {
+    setBackupMode(null);
+    showWarmupToast(
+      `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+    );
+    void (async () => {
+      const accountList = await loadAccounts(true);
       const maskedIds = await loadMaskedAccountIds();
       setMaskedAccounts(new Set(maskedIds));
-      showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
-      );
-    } catch (err) {
-      console.error("Failed to import full encrypted file:", err);
-      showWarmupToast("Full import failed", true);
-    } finally {
-      setIsImportingFull(false);
-    }
+      await refreshUsage(accountList);
+    })();
   };
 
   const handleOpenCodexApp = async () => {
@@ -1846,46 +1810,28 @@ function App() {
                     >
                       + Add Account
                     </button>
-                    <button
-                      onClick={() => {
-                        setIsActionsMenuOpen(false);
-                        void handleExportSlimText();
-                      }}
-                      disabled={isExportingSlim}
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
-                    >
-                      {isExportingSlim ? "Exporting..." : "Export Slim Text"}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setIsActionsMenuOpen(false);
-                        openImportSlimTextModal();
-                      }}
-                      disabled={isImportingSlim}
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
-                    >
-                      {isImportingSlim ? "Importing..." : "Import Slim Text"}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setIsActionsMenuOpen(false);
-                        void handleExportFullFile();
-                      }}
-                      disabled={isExportingFull}
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
-                    >
-                      {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setIsActionsMenuOpen(false);
-                        void handleImportFullFile();
-                      }}
-                      disabled={isImportingFull}
-                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
-                    >
-                      {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
-                    </button>
+                    {canUseBackupFiles() && (
+                      <>
+                        <button
+                          onClick={() => {
+                            setIsActionsMenuOpen(false);
+                            setBackupMode("export");
+                          }}
+                          className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
+                        >
+                          Export Password-Protected Backup
+                        </button>
+                        <button
+                          onClick={() => {
+                            setIsActionsMenuOpen(false);
+                            setBackupMode("import");
+                          }}
+                          className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
+                        >
+                          Restore Backup
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -1896,6 +1842,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
+        {recoveryState && (
+          <SessionRecoveryPanel state={recoveryState} onDismiss={() => setRecoveryState(null)} />
+        )}
         <ShowWeekGuide masked={allMasked} />
         {view === "overview" ? (
           <OverviewPanel
@@ -2195,19 +2144,21 @@ function App() {
           onReopenPreferenceChange={saveDesktopReopenPreference}
           closePreference={codexClose.preference}
           onClosePreferenceChange={saveCodexClosePreference}
+          autoResumeSessions={autoResumeSessions}
+          onAutoResumeSessionsChange={saveAutoResumeSessions}
           onClose={() => setIsSettingsOpen(false)}
         />
       )}
 
       {forceCloseConfirmOpen && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md max-h-[calc(100dvh-2rem)] flex flex-col mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
                 Close running Codex processes?
               </h2>
             </div>
-            <div className="p-5 space-y-3">
+            <div className="p-5 space-y-3 overflow-y-auto">
               <p className="text-sm text-gray-600 dark:text-gray-300">
                 This will {codexClose.forceClose ? "force close" : "gracefully close"} {processInfo?.count ?? 0} Codex process
                 {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently{" "}
@@ -2271,11 +2222,34 @@ function App() {
                   <p className="text-sm text-gray-500 dark:text-gray-400">No supported desktop app could be identified for reopening. Codex will only be closed.</p>
                 )}
               </div>
+              {pendingSwitchAccount && (
+                <div className="space-y-2 rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
+                  <label className="flex items-start gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+                    <input
+                      type="checkbox"
+                      checked={autoResumeSessions}
+                      onChange={(event) => saveAutoResumeSessions(event.target.checked)}
+                      disabled={isCompletingForceClose || desktopReopen.checking || !desktopReopen.available || !desktopReopen.reopen}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-orange-600 disabled:opacity-50"
+                    />
+                    Auto-resume interrupted conversations after switching
+                  </label>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {desktopReopen.checking
+                      ? "Checking whether Codex desktop can reopen…"
+                      : !desktopReopen.available
+                        ? "Requires a supported Codex desktop app to reopen."
+                        : !desktopReopen.reopen
+                          ? "Enable desktop reopening to auto-resume conversations. You can change this in Settings."
+                          : "Continue quota-stopped chats and, on macOS, running chats interrupted by the restart. This preference is saved in Settings."}
+                  </p>
+                </div>
+              )}
               {codexClose.forceClose && (
                 <p className="text-sm text-red-600 dark:text-red-300">Unsaved Codex work may be lost.</p>
               )}
             </div>
-            <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
+            <div className="flex shrink-0 justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
               <button
                 onClick={() => {
                   setPendingSwitchAccountId(null);
@@ -2366,86 +2340,13 @@ function App() {
         onCancelOAuth={cancelOAuthLogin}
       />
 
-      {/* Import/Export Config Modal */}
-      {isConfigModalOpen && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-2xl mx-4 shadow-xl">
-            <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                {configModalMode === "slim_export" ? "Export Slim Text" : "Import Slim Text"}
-              </h2>
-              <button
-                onClick={() => setIsConfigModalOpen(false)}
-                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              {configModalMode === "slim_import" ? (
-                <p className="text-sm text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
-                  Existing accounts are kept. Only missing accounts are imported.
-                </p>
-              ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  This slim string contains account secrets. Keep it private.
-                </p>
-              )}
-              <textarea
-                value={configPayload}
-                onChange={(e) => setConfigPayload(e.target.value)}
-                readOnly={configModalMode === "slim_export"}
-                placeholder={
-                  configModalMode === "slim_export"
-                    ? isExportingSlim
-                      ? "Generating..."
-                      : "Export string will appear here"
-                    : "Paste config string here"
-                }
-                className="w-full h-48 px-4 py-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-800 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 font-mono"
-              />
-              {configModalError && (
-                <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm">
-                  {configModalError}
-                </div>
-              )}
-            </div>
-            <div className="flex gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
-              <button
-                onClick={() => setIsConfigModalOpen(false)}
-                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
-              >
-                Close
-              </button>
-              {configModalMode === "slim_export" ? (
-                <button
-                  onClick={async () => {
-                    if (!configPayload) return;
-                    try {
-                      await navigator.clipboard.writeText(configPayload);
-                      setConfigCopied(true);
-                      setTimeout(() => setConfigCopied(false), 1500);
-                    } catch {
-                      setConfigModalError("Clipboard unavailable. Please copy manually.");
-                    }
-                  }}
-                  disabled={!configPayload || isExportingSlim}
-                  className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
-                >
-                  {configCopied ? "Copied" : "Copy String"}
-                </button>
-              ) : (
-                <button
-                  onClick={handleImportSlimText}
-                  disabled={isImportingSlim}
-                  className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
-                >
-                  {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+      {backupMode && (
+        <BackupPasswordModal
+          mode={backupMode}
+          onClose={() => setBackupMode(null)}
+          onExported={handleBackupExported}
+          onRestored={handleBackupRestored}
+        />
       )}
     </div>
   );

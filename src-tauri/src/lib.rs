@@ -12,17 +12,18 @@ pub mod types;
 pub mod web;
 
 use commands::{
-    ack_close_behavior_prompt, add_account_from_file, cancel_login, check_codex_processes,
-    check_provider_sign_in, complete_close_behavior, complete_login, delete_account,
-    export_accounts_full_encrypted_file, export_accounts_slim_text, get_account_usage_stats,
-    get_active_account_info, get_api_credits, get_claude_prometheus, get_claude_seats,
-    get_claude_usage, get_client_status, get_dock_display_mode, get_masked_account_ids,
-    get_provider_access, get_usage, get_use_next_plan, hide_tray_window,
+    ack_close_behavior_prompt, add_account_from_file, cancel_codex_session_recovery, cancel_login,
+    check_codex_processes, check_provider_sign_in, complete_close_behavior, complete_login,
+    delete_account, export_accounts_full_encrypted_file, export_accounts_slim_text,
+    get_account_usage_stats, get_active_account_info, get_api_credits, get_claude_prometheus,
+    get_claude_seats, get_claude_usage, get_client_status, get_dock_display_mode,
+    get_masked_account_ids, get_provider_access, get_usage, get_use_next_plan, hide_tray_window,
     import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
-    launch_provider, list_accounts, open_main_window, quit_app, refresh_account_metadata,
-    refresh_all_accounts_usage, rename_account, report_usage, report_use_next, save_provider_dates,
-    set_dock_display_mode, set_masked_account_ids, start_login, switch_account, warmup_account,
-    warmup_all_accounts,
+    launch_provider, list_accounts, open_codex_recovery_conversation, open_main_window,
+    prepare_codex_session_recovery, quit_app, refresh_account_metadata, refresh_all_accounts_usage,
+    rename_account, report_usage, report_use_next, resume_codex_session_recovery,
+    save_provider_dates, set_dock_display_mode, set_masked_account_ids, start_login,
+    switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
 
@@ -89,6 +90,8 @@ pub fn run() {
             get_usage,
             get_claude_usage,
             get_claude_seats,
+            commands::set_claude_seat_archived,
+            commands::update_provider_plan,
             get_claude_prometheus,
             get_provider_access,
             get_api_credits,
@@ -105,6 +108,10 @@ pub fn run() {
             // Process detection
             check_codex_processes,
             kill_codex_processes,
+            prepare_codex_session_recovery,
+            cancel_codex_session_recovery,
+            resume_codex_session_recovery,
+            open_codex_recovery_conversation,
             // Tray window
             hide_tray_window,
             open_main_window,

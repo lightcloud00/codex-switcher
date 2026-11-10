@@ -59,21 +59,55 @@ export async function pickAuthJsonFile(): Promise<FileSource | null> {
   return pickBrowserFile(".json,application/json");
 }
 
-export async function exportFullBackupFile(): Promise<boolean> {
+export const MIN_BACKUP_PASSWORD_CHARACTERS = 12;
+const MAX_BACKUP_PASSWORD_BYTES = 1024;
+const MAX_BACKUP_FILE_BYTES = 8 * 1024 * 1024;
+
+export type BackupUnlock = { kind: "password"; password: string } | { kind: "legacy" };
+
+export function canUseBackupFiles(): boolean {
+  if (isTauriRuntime()) return true;
+  if (typeof window === "undefined") return false;
+  const { protocol, hostname } = window.location;
+  return (protocol === "http:" || protocol === "https:") &&
+    ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+}
+
+function requireLocalBackup(): void {
+  if (!canUseBackupFiles()) {
+    throw new Error("Open the desktop app or a local browser to use backups.");
+  }
+}
+
+export function validateNewBackupPassword(password: string, confirmation: string): string | null {
+  if (!password.trim() || Array.from(password).length < MIN_BACKUP_PASSWORD_CHARACTERS) {
+    return `Use at least ${MIN_BACKUP_PASSWORD_CHARACTERS} characters for the password.`;
+  }
+  if (new TextEncoder().encode(password).length > MAX_BACKUP_PASSWORD_BYTES) {
+    return "The backup password is too long.";
+  }
+  if (password !== confirmation) return "The passwords don’t match.";
+  return null;
+}
+
+export async function exportFullBackupFile(password: string): Promise<boolean> {
+  requireLocalBackup();
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const selected = await save({
-      title: "Export Full Encrypted Account Config",
+      title: "Save Password-Protected Backup",
       defaultPath: "codex-switcher-full.cswf",
       filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
     });
 
     if (!selected) return false;
-    await invokeBackend("export_accounts_full_encrypted_file", { path: selected });
+    await invokeBackend("export_accounts_full_encrypted_file", { path: selected, password });
     return true;
   }
 
-  const contentsBase64 = await invokeBackend<string>("export_accounts_full_encrypted_bytes");
+  const contentsBase64 = await invokeBackend<string>("export_accounts_full_encrypted_bytes", {
+    password,
+  });
   downloadBase64File(
     contentsBase64,
     "codex-switcher-full.cswf",
@@ -82,27 +116,40 @@ export async function exportFullBackupFile(): Promise<boolean> {
   return true;
 }
 
-export async function importFullBackupFile(): Promise<ImportAccountsSummary | null> {
+export async function pickFullBackupFile(): Promise<FileSource | null> {
+  requireLocalBackup();
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
-      title: "Import Full Encrypted Account Config",
+      title: "Choose Account Backup",
       filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
     });
 
-    if (!selected || Array.isArray(selected)) return null;
+    return typeof selected === "string" ? selected : null;
+  }
+
+  return pickBrowserFile(".cswf,application/octet-stream");
+}
+
+export async function importFullBackupFile(
+  source: FileSource,
+  unlock: BackupUnlock,
+): Promise<ImportAccountsSummary> {
+  requireLocalBackup();
+  if (typeof source === "string") {
+    if (!isTauriRuntime()) throw new Error("Choose a backup file to restore.");
     return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_file", {
-      path: selected,
+      path: source,
+      unlock,
     });
   }
 
-  const selected = await pickBrowserFile(".cswf,application/octet-stream");
-  if (!selected) return null;
-
-  const contentsBase64 = await fileToBase64(selected);
+  if (source.size > MAX_BACKUP_FILE_BYTES) throw new Error("The backup file is too large.");
+  const contentsBase64 = await fileToBase64(source);
   return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_bytes", {
     contentsBase64,
+    unlock,
   });
 }
 

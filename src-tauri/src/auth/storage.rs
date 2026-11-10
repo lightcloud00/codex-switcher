@@ -1,7 +1,8 @@
 //! Account storage module - manages reading and writing accounts.json
 
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -177,6 +178,83 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     changed
 }
 
+/// Number of rotating `accounts.json.bak.N` copies kept (newest is `.bak.1`).
+const ACCOUNTS_BACKUPS_KEPT: usize = 3;
+
+fn backup_path(path: &Path, n: usize) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".bak.{n}"));
+    path.with_file_name(name)
+}
+
+/// Copy `src` to `dst` with mode 0600 from creation (no world-readable window).
+fn copy_private(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut input = fs::File::open(src)?;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut out = opts.open(dst)?;
+    std::io::copy(&mut input, &mut out)?;
+    out.sync_all()
+}
+
+/// Write `content` to `path` atomically: a 0600 temp file in the same directory
+/// is fsynced and renamed over the target, so a crash leaves either the old or
+/// the new file intact. When `keep_backups > 0`, the previous file is first
+/// rotated into `<name>.bak.1` .. `<name>.bak.N` (all 0600).
+pub(crate) fn atomic_write_private(path: &Path, content: &[u8], keep_backups: usize) -> Result<()> {
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+
+    let write_tmp = || -> std::io::Result<()> {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(content)?;
+        f.sync_all()
+    };
+    if let Err(e) = write_tmp() {
+        let _ = fs::remove_file(&tmp);
+        return Err(e).context("Failed to write temp file");
+    }
+
+    if keep_backups > 0 && path.exists() {
+        // Backup failure must not block saving, but the old file is only
+        // replaced after the temp file is fully durable.
+        for n in (1..keep_backups).rev() {
+            let from = backup_path(path, n);
+            if from.exists() {
+                let _ = fs::rename(&from, backup_path(path, n + 1));
+            }
+        }
+        let _ = copy_private(path, &backup_path(path, 1));
+    }
+
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e).context("Failed to replace file");
+    }
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
     #[cfg(test)]
@@ -242,15 +320,8 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(settings).context("Failed to serialize settings")?;
-    fs::write(&path, content)
+    atomic_write_private(&path, content.as_bytes(), 0)
         .with_context(|| format!("Failed to write settings file: {}", path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)?;
-    }
 
     Ok(())
 }
@@ -268,16 +339,8 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let content =
         serde_json::to_string_pretty(store).context("Failed to serialize accounts store")?;
 
-    fs::write(&path, content)
+    atomic_write_private(&path, content.as_bytes(), ACCOUNTS_BACKUPS_KEPT)
         .with_context(|| format!("Failed to write accounts file: {}", path.display()))?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)?;
-    }
 
     Ok(())
 }
@@ -901,5 +964,50 @@ mod tests {
             &auth("workspace-b", "b1")
         ));
         assert!(!live_auth_may_hold_account(&account_a, &api_key_login));
+    }
+
+    #[test]
+    fn atomic_write_replaces_rotates_backups_and_is_0600() {
+        use super::{atomic_write_private, backup_path};
+        let dir = std::env::temp_dir().join(format!("cs-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("accounts.json");
+        for i in 0..5 {
+            atomic_write_private(&p, format!("v{i}").as_bytes(), 3).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v4");
+        assert_eq!(std::fs::read_to_string(backup_path(&p, 1)).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(backup_path(&p, 3)).unwrap(), "v1");
+        assert!(!backup_path(&p, 4).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [p.clone(), backup_path(&p, 1), backup_path(&p, 3)] {
+                let m = std::fs::metadata(f).unwrap().permissions().mode() & 0o777;
+                assert_eq!(m, 0o600);
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_write_leaves_old_file_intact() {
+        use super::atomic_write_private;
+        let dir = std::env::temp_dir().join(format!("cs-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("accounts.json");
+        atomic_write_private(&p, b"good", 3).unwrap();
+        // Target replaced by a directory makes the final rename fail.
+        let bad = dir.join("target");
+        std::fs::create_dir_all(bad.join("child")).unwrap();
+        assert!(atomic_write_private(&bad, b"new", 3).is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "good");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

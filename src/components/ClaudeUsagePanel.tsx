@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invokeBackend } from "../lib/platform";
+import { ClaudeAccountManager } from "./ClaudeAccountManager";
 import { BlurredText } from "./AccountCard";
 import { claudeSubscriptionText } from "../lib/claudeSubscription";
 import { planDatesText } from "../lib/overview";
@@ -141,7 +142,7 @@ function SeatCard({
           )}
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400"
             title={savedDateText ? "Dates saved under Providers." : "Estimated from the recorded subscription start date assuming monthly billing. Claude does not provide a confirmed expiry date here."}>
-            {savedDateText || claudeSubscriptionText(seat, now)}
+            {savedDateText || (savedDates?.billingInterval === "annual" ? "Annual billing · renewal not recorded" : savedDates?.billingInterval === "none" ? "Free · no paid expiry" : claudeSubscriptionText(seat, now))}
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
@@ -190,7 +191,7 @@ function SeatCard({
         </div>
       ) : noReading ? (
         <div className="space-y-1">
-          <div className="text-xs italic text-amber-600 dark:text-amber-400">{noReadingLine(seat)}</div>
+          <div className="text-xs italic text-amber-600 dark:text-amber-400">{noReadingLine({ ...seat, probeError: null, promState: null, lockOrphaned: false })}</div>
           {lastKnown && <div className="text-[11px] text-gray-400 dark:text-gray-500">{lastKnown}</div>}
         </div>
       ) : (
@@ -204,8 +205,8 @@ function SeatCard({
           {modelWeeks.map(([label, w]) => `${label} week ${formatPct(w)}`).join(" · ")}
         </div>
       )}
-      {seat.probeError && !noReading && (
-        <div className="mt-2 text-xs italic text-amber-600 dark:text-amber-400">{seat.probeError}</div>
+      {seat.probeError && (
+        <details className="mt-2 text-xs text-amber-600 dark:text-amber-400"><summary>Details</summary><p className="break-words">{seat.probeError}</p></details>
       )}
       {seat.launcher && (
         <div className="mt-3 flex items-center justify-between gap-2">
@@ -218,12 +219,14 @@ function SeatCard({
 }
 
 export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
+  const [managing, setManaging] = useState(false);
   const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
   const [plans, setPlans] = useState<PlanDates[]>([]);
   const [registry, setRegistry] = useState<ClaudeSeatRegistry | null>(null);
   // undefined until the first answer; null when the Prometheus call itself failed.
   const [prom, setProm] = useState<ClaudePromSnapshot | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  const [visibilityUnavailable, setVisibilityUnavailable] = useState(false);
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -243,8 +246,9 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     if (usage.value) setSummary(usage.value);
     if (providers) setPlans(providers.plans);
     if (seats) setRegistry(seats);
+    setVisibilityUnavailable(!seats);
     setProm(snapshot);
-    setError(usage.error);
+    setError(usage.error || (!seats ? "Account visibility could not be read. Keeping the last known list." : null));
     setLoading(false);
     setNow(Date.now());
   }, []);
@@ -264,11 +268,12 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
 
   const haveData = summary !== null || registry?.found === true || prom?.found === true;
   const seats = useMemo(() => {
-    if (!haveData) return [];
+    if (!haveData || !registry) return [];
     // Without claude-usage there is no usage-only mode: fall back to the known seats.
     const entries = registry?.found ? registry.seats : summary ? null : [];
     return buildClaudeSeats(entries, summary?.accounts ?? [], prom, now, registry?.hidden_seat_ids);
   }, [haveData, summary, registry, prom, now]);
+  const allSeats = useMemo(() => buildClaudeSeats(registry?.seats ?? [], summary?.accounts ?? [], prom, now), [registry, summary, prom, now]);
   const tokens = summary?.local_tokens;
   const workers = summary?.workers;
 
@@ -286,21 +291,24 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
                 : "Reading Claude usage..."}
           </p>
         </div>
-        <button
+        <div className="flex gap-2"><button onClick={() => setManaging(v => !v)} disabled={!registry} className="h-9 rounded-lg border px-3 text-sm">Manage accounts</button><button
           onClick={() => void load()}
           disabled={loading}
           className="h-9 rounded-lg bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-black dark:hover:bg-neutral-900"
         >
           {loading ? "Refreshing..." : "Refresh"}
-        </button>
+        </button></div>
       </div>
+
+      {managing && <ClaudeAccountManager seats={allSeats} hidden={registry?.hidden_seat_ids ?? []} plans={plans} masked={masked} onChange={load} onClose={() => setManaging(false)} />}
 
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
-          <div className="font-medium">Could not read Claude usage</div>
-          <div className="mt-1">{error}</div>
-          <div className="mt-1 text-xs opacity-80">Run `claude-usage` in Terminal to see the details.</div>
-          {haveData && (
+          <div className="font-medium">{visibilityUnavailable ? "Could not refresh account list" : "Could not read Claude usage"}</div>
+          {visibilityUnavailable && <p className="mt-1 text-xs">{registry ? "Keeping the last known account list." : "Accounts stay hidden until visibility can be read. Try Refresh."}</p>}
+          <details className="mt-1"><summary>Details</summary><p className="break-words">{error}</p></details>
+
+          {haveData && registry && (
             <div className="mt-1 text-xs opacity-80">
               Showing the seats from the registry and Prometheus; numbers may be missing or old.
             </div>
@@ -362,8 +370,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
       )}
 
       <p className="text-xs text-gray-400 dark:text-gray-500">
-        Read-only: seats come from the fleet seat registry and the numbers from Claude Code's own /usage on
-        each machine. No Claude credentials are read or switched.
+        Usage comes from Claude Code on each machine. Account visibility and saved dates are managed locally.
         {prom !== undefined && (
           <span title={prom?.error ?? undefined}>
             {" "}

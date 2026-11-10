@@ -40,6 +40,7 @@ export interface OverviewRow {
   detail?: string;
   /** Codex account id, so the per-account mask applies to this row. */
   maskId?: string;
+  activeLogin?: boolean;
   /** Product and plan, e.g. "Codex Pro", "Claude Max", "DeepSeek API". */
   type: string;
   /** "62%", "$55.94", "see billing" or "—". */
@@ -113,11 +114,17 @@ const PLAN_DATE_FIELDS = [
 /** "Renews: 11/13/2026 · Key expires: Due in 3 days" from the saved plan dates; "" when none is set. */
 export function planDatesText(dates: PlanDates | null | undefined, now = new Date()): string {
   if (!dates) return "";
-  return PLAN_DATE_FIELDS.flatMap(([key, label]) => {
+  if (dates.subscriptionExpiresOn) {
+    const confirmed = Boolean(dates.evidenceSource && dates.lastVerifiedOn);
+    const status = dateStatus(dates.subscriptionExpiresOn, now);
+    return `${confirmed ? "Confirmed" : "Recorded"} expiry: ${status}`;
+  }
+  const recorded = PLAN_DATE_FIELDS.flatMap(([key, label]) => {
     const value = dates[key];
     const status = value ? dateStatus(value, now) : "Unknown";
-    return status === "Unknown" ? [] : [`${label}: ${status}`];
+    return status === "Unknown" ? [] : [`${dates.evidenceSource && dates.lastVerifiedOn ? "Confirmed" : "Recorded"} ${label.toLowerCase()}: ${status}`];
   }).join(" · ");
+  return recorded || (dates.billingInterval === "annual" ? "Annual billing · no monthly estimate" : dates.billingInterval === "none" ? "No subscription renewal" : "");
 }
 
 /** A credit or key expiry date has passed. A passed renewal date alone only says "verify", never expired. */
@@ -160,10 +167,13 @@ function unixResetText(resetsAt: number | null | undefined, nowMs: number): stri
 }
 
 /** Expired wins; then a login only a fresh sign-in can fix; any other usage error is not called a broken login. */
-function codexStatus(expired: boolean, error: string | null | undefined): Pick<OverviewRow, "status" | "tone"> {
+function codexStatus(expired: boolean, error: string | null | undefined, window: TightestWindow | null, stale: boolean): Pick<OverviewRow, "status" | "tone"> {
   if (expired) return { status: "expired", tone: "bad" };
   if (error) return needsRelogin(error) ? { status: "login broken", tone: "bad" } : { status: "usage error", tone: "warn" };
-  return { status: "active", tone: "ok" };
+  if (!window) return { status: "usage unknown", tone: "muted" };
+  if (stale) return { status: "usage stale", tone: "warn" };
+  if (window.used >= 100) return { status: "exhausted", tone: "bad" };
+  return { status: "available", tone: "ok" };
 }
 
 /** One row per Codex account: email (or name), plan, least-remaining window, its reset, expiry, status. */
@@ -172,6 +182,8 @@ export function buildCodexRows(accounts: AccountWithUsage[], nowMs: number): Ove
     const window = tightestWindow(a.usage);
     const expired = isSubscriptionExpired(a.subscription_expires_at, nowMs);
     const error = a.usage?.error;
+    const stale = Boolean(window) && (!Number.isFinite(a.usageCheckedAt) || nowMs - a.usageCheckedAt! > 5 * 60_000
+      || (window!.resetsAt !== null && window!.resetsAt * 1000 <= nowMs));
     const email = a.email?.trim();
     const plan = a.plan_type ? planLabel(a.plan_type) : a.auth_mode === "api_key" ? "API Key" : "Unknown";
     return {
@@ -179,11 +191,12 @@ export function buildCodexRows(accounts: AccountWithUsage[], nowMs: number): Ove
       account: email || a.name,
       detail: email && a.name !== email ? a.name : undefined,
       maskId: a.id,
+      activeLogin: a.is_active,
       type: `Codex ${plan}`,
-      left: leftText(window?.used),
+      left: `${leftText(window?.used)}${stale ? " (stale)" : ""}`,
       resets: window ? unixResetText(window.resetsAt, nowMs) : NONE,
       renews: codexExpiryText(a.subscription_expires_at, nowMs),
-      ...codexStatus(expired, error),
+      ...codexStatus(expired, error, window, stale),
       inactive: isInactive(expired, a.plan_type, window?.used ?? null),
     };
   });
@@ -205,7 +218,7 @@ export function claudeSeatsFromSources(
   nowMs: number,
 ): ClaudeSeat[] {
   const haveData = summary !== null || registry?.found === true || prom?.found === true;
-  if (!haveData) return [];
+  if (!haveData || !registry) return [];
   // Without claude-usage there is no usage-only mode: fall back to the known seats.
   const entries = registry?.found ? registry.seats : summary ? null : [];
   return buildClaudeSeats(entries, summary?.accounts ?? [], prom, nowMs, registry?.hidden_seat_ids);
@@ -216,9 +229,19 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
   const now = new Date(nowMs);
   return seats.map((seat) => {
     const dates = plans.find((p) => p.id === seat.id);
-    const expired = planDatesExpired(dates, now);
-    const week = seat.sevenDay;
-    const used = week?.used_pct ?? null;
+    const expired = planDatesExpired(dates, now) || Boolean(dates?.subscriptionExpiresOn && dateStatus(dates.subscriptionExpiresOn, now).startsWith("Date passed"));
+    const windows = [seat.fiveHour, seat.sevenDay].filter((w) => w?.used_pct != null);
+    const current = windows.filter((w) => w?.state === "current");
+    const usable = current.length ? current : windows;
+    const limiting = usable.reduce<(typeof usable)[number] | null>(
+      (best, w) => !best || w!.used_pct! > best.used_pct! ? w : best,
+      null,
+    );
+    const used = limiting?.used_pct ?? null;
+    const stale = windows.some(w => w?.state !== "current");
+    const exhaustedNow = current.some(w => w!.used_pct! >= 100);
+    const status = exhaustedNow ? "Exhausted" : stale ? "Stale" : used === null ? (seat.status === "no_usage_yet" ? "No usage yet" : "Unknown") : seatStatusLabel(seat.status);
+    const tone: OverviewTone = exhaustedNow ? "bad" : stale ? "warn" : used === null ? "muted" : SEAT_TONE[seat.status];
     const plan = planLabel(seat.plan);
     const left = leftText(used);
     return {
@@ -226,11 +249,11 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
       account: seatTitle(seat),
       detail: seatSubtitle(seat) || undefined,
       type: plan ? `Claude ${plan}` : "Claude",
-      left: used !== null && week?.state === "stale" ? `${left} (stale)` : left,
-      resets: (used !== null && limitBarNotes(week, nowMs).countdown) || NONE,
+      left: used !== null && limiting?.state === "stale" ? `${left} (stale)` : used === null ? "Unknown" : stale && !exhaustedNow ? `${left} (partial)` : left,
+      resets: (used !== null && limitBarNotes(limiting, nowMs).countdown) || NONE,
       renews: planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs),
-      status: expired ? "expired" : seatStatusLabel(seat.status),
-      tone: expired ? "bad" : SEAT_TONE[seat.status],
+      status: expired ? "expired" : status,
+      tone: expired ? "bad" : tone,
       inactive: isInactive(expired, seat.plan, used),
     };
   });

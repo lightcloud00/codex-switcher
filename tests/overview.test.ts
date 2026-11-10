@@ -38,6 +38,7 @@ function account(over: Partial<AccountWithUsage> = {}): AccountWithUsage {
     subscription_expires_at: "2026-12-04T00:00:00Z",
     auth_mode: "chat_g_p_t",
     is_active: false,
+    usageCheckedAt: NOW,
     created_at: "2026-01-01T00:00:00Z",
     last_used_at: null,
     ...over,
@@ -187,7 +188,7 @@ test("a Codex row carries email, plan, percent left, reset, expiry and an active
   assert.equal(r.left, "62%");
   assert.equal(r.resets, "in 1h 18m");
   assert.equal(r.renews, codexExpiryText("2026-12-04T00:00:00Z", NOW));
-  assert.equal(r.status, "active");
+  assert.equal(r.status, "available");
   assert.equal(r.tone, "ok");
   assert.equal(r.inactive, false);
 });
@@ -257,6 +258,16 @@ test("a broken login shows no stale numbers", () => {
   assert.deepEqual([r.left, r.resets], [NONE, NONE]);
 });
 
+test("Codex without a usage reading is unknown, never active", () => {
+  const [r] = buildCodexRows([account()], NOW);
+  assert.deepEqual([r.status, r.tone], ["usage unknown", "muted"]);
+});
+
+test("Codex exhausted usage is not shown as active", () => {
+  const [r] = buildCodexRows([account({ usage: usage({ primary_used_percent: 100 }) })], NOW);
+  assert.deepEqual([r.status, r.tone], ["exhausted", "bad"]);
+});
+
 test("Codex rows are inactive when expired, or free with nothing left", () => {
   const inactive = (a: Partial<AccountWithUsage>) => buildCodexRows([account(a)], NOW)[0].inactive;
   assert.equal(inactive({ subscription_expires_at: "2026-10-01T00:00:00Z" }), true);
@@ -290,18 +301,25 @@ test("a Claude seat without an email shows its id and without numbers shows dash
   );
   assert.equal(r.account, "claude-mac-main");
   assert.equal(r.type, "Claude");
-  assert.deepEqual([r.left, r.resets], [NONE, NONE]);
+  assert.deepEqual([r.left, r.resets], ["Unknown", NONE]);
   assert.deepEqual([r.status, r.tone], ["No usage yet", "muted"]);
   const [reset] = buildClaudeRows([seat({ sevenDay: week({ used_pct: null, state: "reset" }) })], [], NOW);
-  assert.deepEqual([reset.left, reset.resets], [NONE, NONE]);
+  assert.deepEqual([reset.left, reset.resets], ["Unknown", NONE]);
 });
 
 test("a stale Claude reading says so and keeps its reset", () => {
   const [r] = buildClaudeRows([seat({ sevenDay: week({ state: "stale", used_pct: 100 }), status: "exhausted" })], [], NOW);
   assert.equal(r.left, "0% (stale)");
   assert.equal(r.resets, "in 1d 2h");
-  assert.deepEqual([r.status, r.tone], ["Exhausted", "bad"]);
+  assert.deepEqual([r.status, r.tone], ["Stale", "warn"]);
   assert.equal(r.inactive, false);
+});
+
+test("Claude left uses whichever usable 5-hour or weekly allowance is tighter", () => {
+  const [r] = buildClaudeRows([seat({ fiveHour: week({ used_pct: 87 }), sevenDay: week({ used_pct: 41 }) })], [], NOW);
+  assert.equal(r.left, "13%");
+  const [unknown] = buildClaudeRows([seat({ fiveHour: null, sevenDay: null, status: "unknown" })], [], NOW);
+  assert.deepEqual([unknown.left, unknown.status, unknown.tone], ["Unknown", "Unknown", "muted"]);
 });
 
 test("Claude seat dates come from the plan dates saved under the seat id", () => {
@@ -310,7 +328,7 @@ test("Claude seat dates come from the plan dates saved under the seat id", () =>
     dates("claude-mac-096", { billingRenewsOn: "2026-12-25" }),
   ];
   const [r] = buildClaudeRows([seat()], plans, NOW);
-  assert.equal(r.renews, "Renews: Due in 3 days");
+  assert.equal(r.renews, "Recorded renews: Due in 3 days");
   assert.equal(r.inactive, false);
   const [other] = buildClaudeRows([seat({ id: "claude-windows" })], plans, NOW);
   assert.equal(other.renews, "Expiry not recorded");
@@ -318,10 +336,10 @@ test("Claude seat dates come from the plan dates saved under the seat id", () =>
 
 test("a passed Claude renewal date says verify; a passed credit or key expiry marks the seat expired", () => {
   const [verify] = buildClaudeRows([seat()], [dates("claude-mac-main", { billingRenewsOn: "2026-10-01" })], NOW);
-  assert.equal(verify.renews, "Renews: Date passed · verify");
+  assert.equal(verify.renews, "Recorded renews: Date passed · verify");
   assert.deepEqual([verify.status, verify.inactive], ["OK", false]);
   const [expired] = buildClaudeRows([seat()], [dates("claude-mac-main", { credentialExpiresOn: "2026-10-29" })], NOW);
-  assert.equal(expired.renews, "Key expires: Date passed · verify");
+  assert.equal(expired.renews, "Recorded key expires: Date passed · verify");
   assert.deepEqual([expired.status, expired.tone, expired.inactive], ["expired", "bad", true]);
 });
 
@@ -365,7 +383,7 @@ test("an API row with an email and an account name keeps the name as the detail 
 test("an API row takes its dates from the provider plan and a failed probe shows its status label", () => {
   const plans = [dates("fireworks-api", { creditExpiresOn: "2026-11-01" })];
   const [r] = buildApiCreditRows([credit({ id: "fireworks", label: "Fireworks AI", balance: null })], plans, NOW);
-  assert.equal(r.renews, "Credits expire: Due in 2 days");
+  assert.equal(r.renews, "Recorded credits expire: Due in 2 days");
   const [bad] = buildApiCreditRows([credit({ error: "http_401" })], plans, NOW);
   assert.deepEqual([bad.status, bad.tone, bad.left], ["key rejected", "warn", "see billing"]);
   const [off] = buildApiCreditRows([credit({ available: false })], [], NOW);
@@ -389,10 +407,14 @@ test("plan dates text lists each date that is set and skips unset or invalid one
   assert.equal(planDatesText(dates("x", { billingRenewsOn: "2026-02-30" }), NOW_DATE), "");
   assert.equal(
     planDatesText(dates("x", { billingRenewsOn: "2026-11-02", creditExpiresOn: "2026-10-30", credentialExpiresOn: "2026-10-31" }), NOW_DATE),
-    "Renews: Due in 3 days · Credits expire: Due today · verify · Key expires: Due tomorrow",
+    "Recorded renews: Due in 3 days · Recorded credits expire: Due today · verify · Recorded key expires: Due tomorrow",
   );
   const far = new Date(2027, 0, 15).toLocaleDateString();
-  assert.equal(planDatesText(dates("x", { billingRenewsOn: "2027-01-15" }), NOW_DATE), `Renews: ${far}`);
+  assert.equal(planDatesText(dates("x", { billingRenewsOn: "2027-01-15" }), NOW_DATE), `Recorded renews: ${far}`);
+  assert.equal(planDatesText(dates("x", { billingInterval: "annual" }), NOW_DATE), "Annual billing · no monthly estimate");
+  assert.equal(planDatesText(dates("x", { billingInterval: "none" }), NOW_DATE), "No subscription renewal");
+  assert.match(planDatesText(dates("x", { subscriptionExpiresOn: "2026-12-01" }), NOW_DATE), /^Recorded expiry:/);
+  assert.match(planDatesText(dates("x", { subscriptionExpiresOn: "2026-12-01", evidenceSource: "invoice", lastVerifiedOn: "2026-10-30" }), NOW_DATE), /^Confirmed expiry:/);
 });
 
 test("only a passed credit or key expiry counts as expired, never a due-today or passed renewal", () => {
@@ -446,4 +468,19 @@ test("Claude seats come from the registry, usage and Prometheus, and nothing whe
   );
   assert.ok(seats.some((s) => s.id === "claude-mac-main"));
   assert.ok(seats.every((s) => s.status === "no_usage_yet"));
+});
+
+
+test("Codex freshness and login identity stay separate from availability", () => {
+  const stale = buildCodexRows([account({ is_active: true, usage: usage(), usageCheckedAt: NOW - 360_000 })], NOW)[0];
+  assert.equal(stale.status, "usage stale");
+  assert.equal(stale.activeLogin, true);
+  const missing = buildCodexRows([account({ usage: usage(), usageCheckedAt: undefined })], NOW)[0];
+  assert.equal(missing.status, "usage stale");
+});
+test("confirmed annual renewal is shown before an interval fallback", () => {
+  assert.match(planDatesText(dates("x", { billingInterval: "annual", billingRenewsOn: "2027-10-30", evidenceSource: "Billing page", lastVerifiedOn: "2026-10-30" }), NOW_DATE), /^Confirmed renews:/);
+});
+test("cold-start visibility failure never exposes usage-only Claude rows", () => {
+  assert.deepEqual(claudeSeatsFromSources({ accounts: [{ account: "windows-max" }] } as any, null, null, NOW), []);
 });
