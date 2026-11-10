@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invokeBackend } from "../lib/platform";
 import { BlurredText } from "./AccountCard";
+import { claudeSubscriptionText } from "../lib/claudeSubscription";
+import { planDatesText } from "../lib/overview";
+import type { PlanDates } from "../lib/providerAccess";
 import {
   buildClaudeSeats,
   formatPct,
@@ -107,12 +110,15 @@ function SeatCard({
   now,
   masked,
   usageUnavailable,
+  savedDates,
 }: {
   seat: ClaudeSeat;
   now: number;
   masked: boolean;
   usageUnavailable: boolean;
+  savedDates?: PlanDates;
 }) {
+  const savedDateText = planDatesText(savedDates, new Date(now));
   const modelWeeks = Object.entries(seat.modelWeeks);
   const subtitle = seatSubtitle(seat);
   const plan = planLabel(seat.plan);
@@ -133,6 +139,10 @@ function SeatCard({
               {subtitle}
             </div>
           )}
+          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400"
+            title={savedDateText ? "Dates saved under Providers." : "Estimated from the recorded subscription start date assuming monthly billing. Claude does not provide a confirmed expiry date here."}>
+            {savedDateText || claudeSubscriptionText(seat, now)}
+          </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
           <div className="flex items-center gap-1.5">
@@ -209,6 +219,7 @@ function SeatCard({
 
 export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
   const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
+  const [plans, setPlans] = useState<PlanDates[]>([]);
   const [registry, setRegistry] = useState<ClaudeSeatRegistry | null>(null);
   // undefined until the first answer; null when the Prometheus call itself failed.
   const [prom, setProm] = useState<ClaudePromSnapshot | null | undefined>(undefined);
@@ -220,16 +231,18 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     setLoading(true);
     // Each source is optional on its own: a failed claude-usage run, a missing registry or an
     // unreachable Prometheus leaves the rest of the tab (and the previous numbers) in place.
-    const [usage, seats, snapshot] = await Promise.all([
+    const [usage, seats, snapshot, providers] = await Promise.all([
       invokeBackend<ClaudeUsageSummary>("get_claude_usage").then(
         (value) => ({ value, error: null as string | null }),
         (e: unknown) => ({ value: null, error: e instanceof Error ? e.message : String(e) }),
       ),
       invokeBackend<ClaudeSeatRegistry>("get_claude_seats").catch(() => null),
       invokeBackend<ClaudePromSnapshot>("get_claude_prometheus").catch(() => null),
+      invokeBackend<{ plans: PlanDates[] }>("get_provider_access").catch(() => null),
     ]);
     if (usage.value) setSummary(usage.value);
-    setRegistry(seats);
+    if (providers) setPlans(providers.plans);
+    if (seats) setRegistry(seats);
     setProm(snapshot);
     setError(usage.error);
     setLoading(false);
@@ -254,7 +267,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     if (!haveData) return [];
     // Without claude-usage there is no usage-only mode: fall back to the known seats.
     const entries = registry?.found ? registry.seats : summary ? null : [];
-    return buildClaudeSeats(entries, summary?.accounts ?? [], prom, now);
+    return buildClaudeSeats(entries, summary?.accounts ?? [], prom, now, registry?.hidden_seat_ids);
   }, [haveData, summary, registry, prom, now]);
   const tokens = summary?.local_tokens;
   const workers = summary?.workers;
@@ -303,7 +316,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
         <>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {seats.map((seat) => (
-              <SeatCard key={seat.id} seat={seat} now={now} masked={masked} usageUnavailable={!summary} />
+              <SeatCard key={seat.id} seat={seat} now={now} masked={masked} usageUnavailable={!summary} savedDates={plans.find(p => p.id === seat.id)} />
             ))}
           </div>
           {summary && registry && !registry.found && (

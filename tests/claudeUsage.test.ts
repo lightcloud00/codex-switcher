@@ -853,3 +853,22 @@ test("unknownReason is only set for an unknown seat, and hasLiveWindow looks at 
   assert.equal(hasLiveWindow({ fiveHour: null, sevenDay: null }), false);
   assert.equal(lastKnownLine({ fiveHour: null, sevenDay: null }, LIVE_NOW), "");
 });
+
+
+test("hidden Claude seats stay removed through registry fallback and duplicate usage aliases", () => {
+  const account = (label: string, email: string): ClaudeUsageAccount => ({
+    account: label, email, five_hour: null, seven_day: null,
+    model_weeks: {}, pool_spend_today_usd: null,
+  });
+  const accounts = [account("windows-max", "removed@example.com"),
+    account("mac-max", "REMOVED@example.com"), account("wsl-max", "second@example.com"),
+    account("mac-main-max", "kept@example.com")];
+  for (const registry of [null, [], [{ id: "claude-windows", host: "win", plan: "max", usage_account: "windows-max" }]]) {
+    const result = buildSeats(registry, accounts, null, NOW, ["claude-windows", "claude-wsl"]);
+    assert.ok(result.some(seat => seat.email === "kept@example.com"));
+    assert.ok(result.every(seat => !["claude-windows", "claude-wsl"].includes(seat.id)));
+    assert.ok(result.every(seat => !seat.email || seat.email.toLowerCase() === "kept@example.com"));
+  }
+  assert.ok(buildSeats([], accounts, null, NOW).some(seat => seat.id === "claude-windows"));
+  assert.equal(accounts.length, 4);
+});

@@ -14,7 +14,7 @@ use crate::{
     auth::{load_accounts, read_current_auth, reconcile_active_account_with_live_auth},
     commands::{
         cached_subscription_expiry, check_codex_processes, load_summary_for_capacity, merge_seats,
-        read_seat_registry, SeatReading,
+        read_hidden_seat_ids, read_seat_registry, visible_seat_readings, SeatReading,
     },
     types::{AccountsStore, StoredAccount, UsageInfo},
 };
@@ -567,16 +567,23 @@ fn build_snapshot_with_claude(
 /// Claude seat lanes from the fleet seat registry and the claude-usage summary. Either source may be
 /// missing: a missing registry leaves the known seats, a missing summary leaves every status unknown.
 async fn claude_seat_lanes(now: DateTime<Utc>) -> Vec<ClaudeSeatLane> {
+    // A malformed local preference cannot make a removed lane available again.
+    let Ok(hidden) = read_hidden_seat_ids() else {
+        return Vec::new();
+    };
     let registry = read_seat_registry().ok();
     let summary = load_summary_for_capacity(now).await;
     let accounts = summary
         .as_ref()
         .and_then(|value| value.get("accounts"))
         .and_then(|value| value.as_array());
-    merge_seats(registry.as_deref(), accounts.map(Vec::as_slice), now)
-        .into_iter()
-        .map(ClaudeSeatLane::from)
-        .collect()
+    visible_seat_readings(
+        merge_seats(registry.as_deref(), accounts.map(Vec::as_slice), now),
+        &hidden,
+    )
+    .into_iter()
+    .map(ClaudeSeatLane::from)
+    .collect()
 }
 
 /// `include_claude_seats` appends the Claude seat lanes. It is opt-in because a consumer that

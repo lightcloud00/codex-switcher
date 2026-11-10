@@ -1,3 +1,4 @@
+import { claudeSubscriptionText } from "./claudeSubscription.ts";
 import type {
   AccountWithUsage,
   ClaudePromSnapshot,
@@ -207,7 +208,7 @@ export function claudeSeatsFromSources(
   if (!haveData) return [];
   // Without claude-usage there is no usage-only mode: fall back to the known seats.
   const entries = registry?.found ? registry.seats : summary ? null : [];
-  return buildClaudeSeats(entries, summary?.accounts ?? [], prom, nowMs);
+  return buildClaudeSeats(entries, summary?.accounts ?? [], prom, nowMs, registry?.hidden_seat_ids);
 }
 
 /** One row per Claude seat: email (or seat id), plan, 7-day left and reset, plan dates saved for the seat. */
@@ -227,7 +228,7 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
       type: plan ? `Claude ${plan}` : "Claude",
       left: used !== null && week?.state === "stale" ? `${left} (stale)` : left,
       resets: (used !== null && limitBarNotes(week, nowMs).countdown) || NONE,
-      renews: planDatesText(dates, now) || NONE,
+      renews: planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs),
       status: expired ? "expired" : seatStatusLabel(seat.status),
       tone: expired ? "bad" : SEAT_TONE[seat.status],
       inactive: isInactive(expired, seat.plan, used),

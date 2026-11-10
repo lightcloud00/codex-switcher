@@ -276,7 +276,7 @@ test("a Claude row carries email, plan, 7-day left, reset and the status", () =>
   assert.equal(r.type, "Claude Max");
   assert.equal(r.left, "59%");
   assert.equal(r.resets, "in 1d 2h");
-  assert.equal(r.renews, NONE);
+  assert.equal(r.renews, "Expiry not recorded");
   assert.equal(r.status, "OK");
   assert.equal(r.tone, "ok");
   assert.equal(r.inactive, false);
@@ -313,7 +313,7 @@ test("Claude seat dates come from the plan dates saved under the seat id", () =>
   assert.equal(r.renews, "Renews: Due in 3 days");
   assert.equal(r.inactive, false);
   const [other] = buildClaudeRows([seat({ id: "claude-windows" })], plans, NOW);
-  assert.equal(other.renews, NONE);
+  assert.equal(other.renews, "Expiry not recorded");
 });
 
 test("a passed Claude renewal date says verify; a passed credit or key expiry marks the seat expired", () => {

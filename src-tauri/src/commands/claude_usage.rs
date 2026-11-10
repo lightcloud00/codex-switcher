@@ -203,6 +203,43 @@ fn registry_path(home: &Path) -> PathBuf {
     home.join(REGISTRY_RELATIVE)
 }
 
+/// Local display preferences only: no login, credential or fleet-registry changes.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeatPreferences {
+    #[serde(default)]
+    hidden_seat_ids: Vec<String>,
+}
+
+fn parse_hidden_seats(raw: &str) -> Result<Vec<String>, String> {
+    let preferences: SeatPreferences =
+        serde_json::from_str(raw).map_err(|_| "Invalid Claude seat preferences".to_string())?;
+    if preferences.hidden_seat_ids.len() > 64
+        || preferences.hidden_seat_ids.iter().any(|id| !safe_token(id))
+    {
+        return Err("Invalid hidden Claude seat IDs".to_string());
+    }
+    Ok(preferences.hidden_seat_ids)
+}
+
+pub fn read_hidden_seat_ids() -> Result<Vec<String>, String> {
+    let path = dirs::config_dir()
+        .ok_or("config directory unavailable")?
+        .join("codex-switcher/claude-seats.json");
+    match std::fs::read_to_string(path) {
+        Ok(raw) => parse_hidden_seats(&raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(_) => Err("Could not read Claude seat preferences".to_string()),
+    }
+}
+
+pub fn visible_seat_readings(seats: Vec<SeatReading>, hidden: &[String]) -> Vec<SeatReading> {
+    seats
+        .into_iter()
+        .filter(|seat| !hidden.contains(&seat.seat_id))
+        .collect()
+}
+
 /// Read the deployed seat registry. `Err` carries a short reason (missing, unreadable, wrong schema).
 pub fn read_seat_registry() -> Result<Vec<RegistrySeat>, String> {
     let path = registry_path(&home()?);
@@ -216,6 +253,7 @@ pub fn read_seat_registry() -> Result<Vec<RegistrySeat>, String> {
 /// The `get_claude_seats` payload: `{found, seats, error}`. A missing local registry is data;
 /// an installed Windows metadata bridge can supply the fleet registry instead.
 pub async fn fetch_claude_seats() -> Result<Value, String> {
+    let hidden = read_hidden_seat_ids()?;
     #[cfg(windows)]
     if read_seat_registry().is_err() {
         if let Some(binary) = super::api_credits::find_metadata_helper("seat-registry") {
@@ -223,14 +261,19 @@ pub async fn fetch_claude_seats() -> Result<Value, String> {
                 &super::api_credits::run_probe(binary.clone(), &[], 30, "Claude seat registry")
                     .await?,
             )?;
-            let mut value = json!({"found": true, "seats": seats, "error": null});
+            let mut value =
+                json!({"found": true, "seats": seats, "hidden_seat_ids": hidden, "error": null});
             super::api_credits::mark_metadata_source(&mut value, &binary);
             return Ok(value);
         }
     }
     Ok(match read_seat_registry() {
-        Ok(seats) => json!({ "found": true, "seats": seats, "error": null }),
-        Err(error) => json!({ "found": false, "seats": [], "error": error }),
+        Ok(seats) => {
+            json!({ "found": true, "seats": seats, "hidden_seat_ids": hidden, "error": null })
+        }
+        Err(error) => {
+            json!({ "found": false, "seats": [], "hidden_seat_ids": hidden, "error": error })
+        }
     })
 }
 
@@ -490,6 +533,21 @@ fn check_summary_age(summary: Value, now: DateTime<Utc>) -> Result<Value, String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_visibility_preferences_validate_and_filter_capacity() {
+        let hidden =
+            super::parse_hidden_seats(r#"{"hidden_seat_ids":["claude-windows","claude-wsl"]}"#)
+                .unwrap();
+        let seats = super::merge_seats(None, None, chrono::Utc::now());
+        let before = seats.len();
+        let visible = super::visible_seat_readings(seats, &hidden);
+        assert_eq!(visible.len(), before - 2);
+        assert!(visible.iter().all(|seat| !hidden.contains(&seat.seat_id)));
+        assert!(super::parse_hidden_seats(r#"{"hidden_seat_ids":["../auth"]}"#).is_err());
+        assert!(super::parse_hidden_seats(r#"{"unexpected":"value"}"#).is_err());
+        assert!(super::parse_hidden_seats("{}").unwrap().is_empty());
+    }
+
     use super::*;
     use chrono::TimeZone;
 
