@@ -166,6 +166,8 @@ export interface ClaudeUsageAccount {
   account: string;
   /** Email the host's Claude Code is signed in to (null until a probe reads it). */
   email?: string | null;
+  subscription_created_at?: string | null;
+  billing_type?: string | null;
   five_hour: ClaudeUsageWindow | null;
   seven_day: ClaudeUsageWindow | null;
   model_weeks?: Record<string, ClaudeUsageWindow>;
@@ -248,6 +250,7 @@ export interface ClaudeSeatRegistry {
   /** False when the registry file is missing or unreadable; the tab then shows usage-only cards. */
   found: boolean;
   seats: ClaudeSeatRegistryEntry[];
+  hidden_seat_ids?: string[];
   error?: string | null;
 }
 
@@ -258,6 +261,8 @@ export interface ClaudeSeat {
   host: string | null;
   plan: string | null;
   email: string | null;
+  subscriptionCreatedAt?: string | null;
+  billingType?: string | null;
   /** The claude-usage account label this seat's readings came from. */
   usageAccount: string | null;
   fiveHour: ClaudeUsageWindow | null;

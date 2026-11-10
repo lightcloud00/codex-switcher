@@ -245,6 +245,8 @@ function seatFromUsage(
   return {
     ...base,
     email: usage?.email?.trim() || null,
+    subscriptionCreatedAt: usage?.subscription_created_at ?? null,
+    billingType: usage?.billing_type ?? null,
     usageAccount: usage?.account ?? null,
     fiveHour: usage?.five_hour ?? null,
     sevenDay: usage?.seven_day ?? null,
@@ -446,7 +448,19 @@ export function buildClaudeSeats(
   accounts: ClaudeUsageAccount[],
   prom?: ClaudePromSnapshot | null,
   nowMs: number = Date.now(),
+  hiddenSeatIds: readonly string[] = [],
 ): ClaudeSeat[] {
+  const hiddenLabels = new Set(hiddenSeatIds);
+  for (const known of KNOWN_SEATS) {
+    if (hiddenLabels.has(known.id)) known.usage_labels.forEach(label => hiddenLabels.add(label));
+  }
+  for (const entry of registry ?? []) {
+    if (hiddenLabels.has(entry.id) && entry.usage_account) hiddenLabels.add(entry.usage_account);
+  }
+  const hiddenEmails = new Set(accounts
+    .filter(account => hiddenLabels.has(account.account))
+    .map(account => account.email?.trim().toLowerCase())
+    .filter(Boolean));
   const claimed = new Set<string>();
   const seats: ClaudeSeat[] = [];
 
@@ -499,7 +513,9 @@ export function buildClaudeSeats(
     );
   }
 
-  return seats.map((seat) => {
+  return seats.filter(seat => !hiddenLabels.has(seat.id)
+    && !hiddenLabels.has(seat.usageAccount ?? "")
+    && !hiddenEmails.has(seat.email?.trim().toLowerCase())).map((seat) => {
     const fiveHour = windowAt(seat.fiveHour, nowMs);
     const sevenDay = windowAt(seat.sevenDay, nowMs);
     const current = {
