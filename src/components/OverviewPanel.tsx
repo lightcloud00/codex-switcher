@@ -39,16 +39,6 @@ const TONE_BADGE: Record<OverviewTone, string> = {
 };
 const BADGE_BASE = "inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium";
 
-// Fixed widths so the columns line up from one section to the next.
-const COLUMNS = [
-  { label: "Account (email)", width: "25%" },
-  { label: "Type", width: "12%" },
-  { label: "Left", width: "11%" },
-  { label: "Resets", width: "18%" },
-  { label: "Renews / expires", width: "20%" },
-  { label: "Status", width: "14%" },
-] as const;
-
 interface OverviewPanelProps {
   /** The Codex accounts App already loads (list_accounts plus usage). */
   accounts: AccountWithUsage[];
@@ -81,44 +71,25 @@ function Section({
       {rows.length === 0 ? (
         <p className="text-xs italic text-gray-500 dark:text-gray-400">{empty}</p>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
-          <table className="w-full min-w-[880px] table-fixed text-left text-sm">
-            <colgroup>
-              {COLUMNS.map((c) => (
-                <col key={c.label} style={{ width: c.width }} />
-              ))}
-            </colgroup>
-            <thead>
-              <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                {COLUMNS.map((c) => (
-                  <th key={c.label} scope="col" className="px-3 py-2 font-medium">
-                    {c.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-              {rows.map((row) => (
-                <OverviewTableRow key={row.id} row={row} blur={isMasked(row)} />
-              ))}
-            </tbody>
-          </table>
+        <div className="min-w-0 divide-y divide-gray-100 overflow-hidden rounded-xl border border-gray-200 bg-white dark:divide-gray-800 dark:border-gray-800 dark:bg-gray-900">
+          {rows.map((row) => <OverviewCompactRow key={row.id} row={row} blur={isMasked(row)} />)}
         </div>
       )}
-      {note && rows.length > 0 && <p className="mt-1 text-xs italic text-gray-500 dark:text-gray-400">{note}</p>}
+      {note && <details className="mt-1 text-xs text-gray-500 dark:text-gray-400"><summary className="cursor-pointer">Details</summary><p className="break-words">{note}</p></details>}
     </section>
   );
 }
 
-function OverviewTableRow({ row, blur }: { row: OverviewRow; blur: boolean }) {
+function OverviewCompactRow({ row, blur }: { row: OverviewRow; blur: boolean }) {
   const text = "text-gray-900 dark:text-gray-100";
   const sub = "text-gray-500 dark:text-gray-400";
   // An expired or empty free account stays readable but recedes.
   return (
-    <tr className={`align-top ${row.inactive ? "opacity-60" : ""}`} data-inactive={row.inactive || undefined}>
-      <td className="px-3 py-2">
+    <article className={`min-w-0 p-3 ${row.inactive ? "opacity-60" : ""}`} data-inactive={row.inactive || undefined}>
+      <div className="flex min-w-0 items-start justify-between gap-2">
+        <div className="min-w-0">
         {row.account ? (
-          <div className={`break-words font-medium ${text}`}>
+          <div className={`break-all font-medium ${text}`}>
             <BlurredText blur={blur}>{row.account}</BlurredText>
           </div>
         ) : (
@@ -129,18 +100,17 @@ function OverviewTableRow({ row, blur }: { row: OverviewRow; blur: boolean }) {
             <BlurredText blur={blur}>{row.detail}</BlurredText>
           </div>
         )}
-      </td>
-      <td className="px-3 py-2">
-        {/* The type badge may wrap: tool and plan names are longer than the status words. */}
-        <span className={`${BADGE_BASE} ${TONE_BADGE.muted} max-w-full whitespace-normal break-words`}>{row.type}</span>
-      </td>
-      <td className={`px-3 py-2 font-medium tabular-nums ${text}`}>{row.left}</td>
-      <td className={`px-3 py-2 ${sub}`}>{row.resets}</td>
-      <td className={`px-3 py-2 text-xs ${sub}`}>{row.renews}</td>
-      <td className="px-3 py-2">
+          <span className={`${BADGE_BASE} ${TONE_BADGE.muted} mt-1 inline-block max-w-full whitespace-normal break-words`}>{row.type}</span>
+          {row.activeLogin && <span className="ml-2 text-xs text-gray-500">Current login</span>}
+        </div>
         <span className={`${BADGE_BASE} ${TONE_BADGE[row.tone]}`}>{row.status}</span>
-      </td>
-    </tr>
+      </div>
+      <div className="mt-2 grid min-w-0 grid-cols-2 gap-x-3 gap-y-1 text-xs">
+        <div><span className={sub}>Left </span><span className={`font-medium tabular-nums ${text}`}>{row.left}</span></div>
+        <div className={sub}>Resets {row.resets}</div>
+        <div className={`col-span-2 break-words ${sub}`}>{row.renews}</div>
+      </div>
+    </article>
   );
 }
 
@@ -154,6 +124,7 @@ export function OverviewPanel({
   const desktop = isTauriRuntime();
   const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
   const [registry, setRegistry] = useState<ClaudeSeatRegistry | null>(null);
+  const [registryError, setRegistryError] = useState(false);
   // undefined until the first answer; null when the Prometheus call itself failed.
   const [prom, setProm] = useState<ClaudePromSnapshot | null | undefined>(undefined);
   const [claudeLoading, setClaudeLoading] = useState(true);
@@ -174,15 +145,17 @@ export function OverviewPanel({
   const loadLocal = useCallback(async () => {
     const run = ++latestClaude.current;
     setClaudeLoading(true);
-    const [usage, seats, snapshot, access] = await Promise.all([
+    const [usage, seatResult, snapshot, access] = await Promise.all([
       invokeBackend<ClaudeUsageSummary>("get_claude_usage").catch(() => null),
-      invokeBackend<ClaudeSeatRegistry>("get_claude_seats").catch(() => null),
+      invokeBackend<ClaudeSeatRegistry>("get_claude_seats").then((value) => ({ value, error: false })).catch(() => ({ value: null, error: true })),
       invokeBackend<ClaudePromSnapshot>("get_claude_prometheus").catch(() => null),
       invokeBackend<{ plans: PlanDates[] }>("get_provider_access").catch(() => null),
     ]);
     if (run !== latestClaude.current) return;
     if (usage) setSummary(usage);
-    setRegistry(seats);
+    // A failed read returns null; keep the prior registry (including hidden IDs) so seats stay hidden.
+    setRegistryError(seatResult.error);
+    if (seatResult.value) setRegistry(seatResult.value);
     setProm(snapshot);
     if (access) setPlans(access.plans);
     setClaudeLoading(false);
@@ -213,6 +186,12 @@ export function OverviewPanel({
   }, [loadLocal]);
 
   useEffect(() => {
+    const refresh = () => void loadLocal();
+    window.addEventListener("claude-seats-changed", refresh);
+    return () => window.removeEventListener("claude-seats-changed", refresh);
+  }, [loadLocal]);
+
+  useEffect(() => {
     const tick = () => setNow(Date.now());
     const id = window.setInterval(tick, 15_000);
     document.addEventListener("visibilitychange", tick);
@@ -240,7 +219,10 @@ export function OverviewPanel({
     void loadClient(false);
   }, [loadCredits, loadClient]);
 
-  const seats = useMemo(() => claudeSeatsFromSources(summary, registry, prom, now), [summary, registry, prom, now]);
+  const seats = useMemo(
+    () => registryError && !registry ? [] : claudeSeatsFromSources(summary, registry, prom, now),
+    [summary, registry, prom, now, registryError],
+  );
   const subscriptionRows = useMemo(
     () => sortOverviewRows([...buildCodexRows(accounts, now), ...buildClaudeRows(seats, plans, now)]),
     [accounts, seats, plans, now],
@@ -258,17 +240,14 @@ export function OverviewPanel({
 
   const isMasked = (row: OverviewRow) => masked || (row.maskId !== undefined && maskedAccountIds.has(row.maskId));
   const busy = claudeLoading || creditsLoading || clientLoading;
-  const subscriptionsNote = accountsLoading
-    ? "Loading Codex accounts…"
-    : accountsError
-      ? `Could not load Codex accounts: ${accountsError}`
-      : "";
+  const subscriptionsNote = [accountsError && `Could not load Codex accounts: ${accountsError}`, registryError && !registry && "Claude seat visibility is unavailable; retry refresh."].filter(Boolean).join(" · ");
+  const subscriptionsEmpty = accountsLoading ? "Loading Codex accounts…" : accountsError ? "Account data unavailable." : registryError && !registry ? "Claude seats unavailable until visibility registry responds." : "No subscription accounts yet.";
   const clientEmpty = !desktop
     ? "Tool and Grok status is checked from the desktop app only."
-    : clientError || (clientLoading ? "Checking clients and the three Grok Bots…" : "No status reported.");
+    : clientLoading ? "Checking clients and the three Grok Bots…" : "No status reported.";
   const prepaidEmpty = !desktop
     ? "API credits are checked from the desktop app only."
-    : creditsError || (creditsLoading ? "Checking providers through CredVault…" : "No providers reported.");
+    : creditsLoading ? "Checking providers through CredVault…" : "No providers reported.";
 
   return (
     <div className="min-w-0 space-y-6">
@@ -302,7 +281,7 @@ export function OverviewPanel({
         title="Subscriptions"
         rows={subscriptionRows}
         isMasked={isMasked}
-        empty={subscriptionsNote || "No subscription accounts yet."}
+        empty={subscriptionsEmpty}
         note={subscriptionsNote}
       />
       <Section
@@ -316,7 +295,7 @@ export function OverviewPanel({
       <Section title="Tools (IDE / CLI)" rows={tools} isMasked={isMasked} empty={clientEmpty} note={clientError} />
 
       <p className="text-xs text-gray-400 dark:text-gray-500">
-        Left is the Codex window with the least remaining, the 7-day window for Claude, and the provider balance for
+        Left is the Codex window with the least remaining, the limiting current 5-hour or weekly window for Claude, and the provider balance for
         prepaid APIs. Grok has no quota API, so its Left is the last hand reading from grok.com with its age. Expired
         accounts and free accounts with nothing left sort last and are dimmed.
       </p>

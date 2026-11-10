@@ -204,7 +204,7 @@ fn registry_path(home: &Path) -> PathBuf {
 }
 
 /// Local display preferences only: no login, credential or fleet-registry changes.
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SeatPreferences {
     #[serde(default)]
@@ -223,14 +223,48 @@ fn parse_hidden_seats(raw: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn read_hidden_seat_ids() -> Result<Vec<String>, String> {
-    let path = dirs::config_dir()
-        .ok_or("config directory unavailable")?
-        .join("codex-switcher/claude-seats.json");
+    let path = super::provider_access::metadata_dir()?.join("claude-seats.json");
     match std::fs::read_to_string(path) {
         Ok(raw) => parse_hidden_seats(&raw),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(_) => Err("Could not read Claude seat preferences".to_string()),
     }
+}
+
+static SEAT_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn set_archived(hidden: &mut Vec<String>, id: &str, archived: bool) -> Result<(), String> {
+    if !safe_token(id) {
+        return Err("Invalid seat ID".into());
+    }
+    hidden.retain(|entry| entry != id);
+    if archived {
+        hidden.push(id.to_string());
+    }
+    if hidden.len() > 64 {
+        return Err("Too many archived seats".into());
+    }
+    Ok(())
+}
+
+/// Archive affects Switcher display and capacity metadata, never sign-in or billing.
+#[tauri::command]
+pub async fn set_claude_seat_archived(id: String, archived: bool) -> Result<Vec<String>, String> {
+    let _lock = SEAT_WRITE_LOCK
+        .lock()
+        .map_err(|_| "Seat update unavailable")?;
+    let mut hidden = read_hidden_seat_ids()?;
+    set_archived(&mut hidden, &id, archived)?;
+    let path = super::provider_access::metadata_dir()?.join("claude-seats.json");
+    std::fs::create_dir_all(path.parent().ok_or("Invalid config path")?)
+        .map_err(|_| "Could not create config directory")?;
+    let bytes = serde_json::to_vec_pretty(&SeatPreferences {
+        hidden_seat_ids: hidden.clone(),
+    })
+    .map_err(|_| "Could not encode seat preferences")?;
+    crate::auth::storage::atomic_write_private(&path, &bytes, 0)
+        .map_err(|_| "Could not save seat preferences")?;
+    Ok(hidden)
 }
 
 pub fn visible_seat_readings(seats: Vec<SeatReading>, hidden: &[String]) -> Vec<SeatReading> {
@@ -533,6 +567,38 @@ fn check_summary_age(summary: Value, now: DateTime<Utc>) -> Result<Value, String
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_preferences_round_trip_without_any_account_store() {
+        let _home = crate::auth::test_support::TestHome::new();
+        assert!(read_hidden_seat_ids().unwrap().is_empty());
+        set_claude_seat_archived("claude-windows".into(), true)
+            .await
+            .unwrap();
+        set_claude_seat_archived("claude-wsl".into(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_hidden_seat_ids().unwrap(),
+            vec!["claude-windows", "claude-wsl"]
+        );
+        set_claude_seat_archived("claude-windows".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(read_hidden_seat_ids().unwrap(), vec!["claude-wsl"]);
+        assert!(!crate::auth::storage::get_accounts_file().unwrap().exists());
+    }
+
+    #[test]
+    fn archive_restore_is_idempotent_and_preserves_other_seats() {
+        let mut hidden = vec!["claude-windows".into()];
+        set_archived(&mut hidden, "claude-mac-main", true).unwrap();
+        set_archived(&mut hidden, "claude-mac-main", true).unwrap();
+        assert_eq!(hidden.len(), 2);
+        set_archived(&mut hidden, "claude-mac-main", false).unwrap();
+        assert_eq!(hidden, vec!["claude-windows"]);
+        assert!(set_archived(&mut hidden, "../invalid", true).is_err());
+    }
+
     #[test]
     fn local_visibility_preferences_validate_and_filter_capacity() {
         let hidden =

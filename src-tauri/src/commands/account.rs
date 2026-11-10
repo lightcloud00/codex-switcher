@@ -13,7 +13,7 @@ use super::process::ensure_codex_not_running;
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
@@ -37,15 +37,28 @@ const SLIM_AUTH_API_KEY: u8 = 0;
 const SLIM_AUTH_CHATGPT: u8 = 1;
 
 const FULL_FILE_MAGIC: &[u8; 4] = b"CSWF";
-const FULL_FILE_VERSION: u8 = 1;
+const FULL_LEGACY_FILE_VERSION: u8 = 1;
+const FULL_PASSWORD_FILE_VERSION: u8 = 2;
+const FULL_PASSWORD_HEADER: &[u8] = b"CSWF\x02";
 const FULL_SALT_LEN: usize = 16;
 const FULL_NONCE_LEN: usize = 24;
-const FULL_KDF_ITERATIONS: u32 = 210_000;
-const FULL_PRESET_PASSPHRASE: &str = "gT7kQ9mV2xN4pL8sR1dH6zW3cB5yF0uJ_aE7nK2tP9vM4rX1";
+const FULL_LEGACY_KDF_ITERATIONS: u32 = 210_000;
+const FULL_PASSWORD_KDF_ITERATIONS: u32 = 600_000;
+const MIN_BACKUP_PASSWORD_CHARS: usize = 12;
+const MAX_BACKUP_PASSWORD_BYTES: usize = 1024;
+// This public, built-in passphrase only exists to open explicitly selected v1 backups.
+const FULL_LEGACY_PASSPHRASE: &str = "gT7kQ9mV2xN4pL8sR1dH6zW3cB5yF0uJ_aE7nK2tP9vM4rX1";
 
 const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const SLIM_IMPORT_CONCURRENCY: usize = 6;
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BackupUnlock {
+    Password { password: String },
+    Legacy,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SlimPayload {
@@ -273,44 +286,48 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 
 /// Export full account config as an encrypted file.
 #[tauri::command]
-pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let encrypted =
-        encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+pub async fn export_accounts_full_encrypted_file(
+    path: String,
+    password: String,
+) -> Result<(), String> {
+    let encrypted = export_accounts_full_encrypted_bytes(password).await?;
     write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Export full account config as encrypted bytes for browser clients.
-pub async fn export_accounts_full_encrypted_bytes() -> Result<Vec<u8>, String> {
+pub async fn export_accounts_full_encrypted_bytes(password: String) -> Result<Vec<u8>, String> {
+    validate_backup_password(&password, true).map_err(|e| e.to_string())?;
     let store = load_accounts().map_err(|e| e.to_string())?;
-    encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || encode_full_encrypted_store(&store, &password))
+        .await
+        .map_err(|_| "Backup encryption did not finish".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Import full account config from an encrypted file, skipping existing accounts.
 #[tauri::command]
 pub async fn import_accounts_full_encrypted_file(
     path: String,
+    unlock: BackupUnlock,
 ) -> Result<ImportAccountsSummary, String> {
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
-    let imported = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE)
-        .map_err(|e| e.to_string())?;
-    validate_imported_store(&imported).map_err(|e| e.to_string())?;
-
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    import_accounts_full_encrypted_bytes(encrypted, unlock).await
 }
 
 /// Import full account config from encrypted bytes uploaded through the browser UI.
 pub async fn import_accounts_full_encrypted_bytes(
     bytes: Vec<u8>,
+    unlock: BackupUnlock,
 ) -> Result<ImportAccountsSummary, String> {
     let imported =
-        decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || decode_full_encrypted_store(&bytes, &unlock))
+            .await
+            .map_err(|_| "Backup decryption did not finish".to_string())?
+            .map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
+    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     let current = load_accounts().map_err(|e| e.to_string())?;
     let (merged, summary) = merge_accounts_store(current, imported);
     save_accounts(&merged).map_err(|e| e.to_string())?;
@@ -579,8 +596,24 @@ async fn restore_slim_accounts(
     Ok(restored)
 }
 
-fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyhow::Result<Vec<u8>> {
+fn validate_backup_password(password: &str, creating: bool) -> anyhow::Result<()> {
+    if password.trim().is_empty() {
+        anyhow::bail!("Enter the backup password");
+    }
+    if creating && password.chars().count() < MIN_BACKUP_PASSWORD_CHARS {
+        anyhow::bail!("Use a backup password with at least {MIN_BACKUP_PASSWORD_CHARS} characters");
+    }
+    if password.len() > MAX_BACKUP_PASSWORD_BYTES {
+        anyhow::bail!("The backup password is too long");
+    }
+    Ok(())
+}
+
+fn encode_full_encrypted_store(store: &AccountsStore, password: &str) -> anyhow::Result<Vec<u8>> {
     let json = serde_json::to_vec(store).context("Failed to serialize account store")?;
+    if json.len() as u64 > MAX_IMPORT_JSON_BYTES {
+        anyhow::bail!("Account data is too large for a backup");
+    }
     let compressed = compress_bytes(&json).context("Failed to compress account store")?;
 
     let mut salt = [0u8; FULL_SALT_LEN];
@@ -589,15 +622,20 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
     let mut nonce = [0u8; FULL_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
 
-    let key = derive_encryption_key(passphrase, &salt);
+    let key = derive_encryption_key(password, &salt, FULL_PASSWORD_KDF_ITERATIONS);
     let cipher = XChaCha20Poly1305::new((&key).into());
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), compressed.as_slice())
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &compressed,
+                aad: FULL_PASSWORD_HEADER,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("Failed to encrypt account store"))?;
 
     let mut out = Vec::with_capacity(4 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN + ciphertext.len());
-    out.extend_from_slice(FULL_FILE_MAGIC);
-    out.push(FULL_FILE_VERSION);
+    out.extend_from_slice(FULL_PASSWORD_HEADER);
     out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
@@ -607,7 +645,7 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
 
 fn decode_full_encrypted_store(
     file_bytes: &[u8],
-    passphrase: &str,
+    unlock: &BackupUnlock,
 ) -> anyhow::Result<AccountsStore> {
     if file_bytes.len() as u64 > MAX_IMPORT_FILE_BYTES {
         anyhow::bail!("Encrypted file is too large");
@@ -622,10 +660,22 @@ fn decode_full_encrypted_store(
         anyhow::bail!("Encrypted file header is invalid");
     }
 
-    let version = file_bytes[4];
-    if version != FULL_FILE_VERSION {
-        anyhow::bail!("Unsupported encrypted file version: {version}");
-    }
+    let (password, iterations, aad): (&str, u32, &[u8]) = match (file_bytes[4], unlock) {
+        (FULL_PASSWORD_FILE_VERSION, BackupUnlock::Password { password }) => {
+            validate_backup_password(password, false)?;
+            (password, FULL_PASSWORD_KDF_ITERATIONS, FULL_PASSWORD_HEADER)
+        }
+        (FULL_LEGACY_FILE_VERSION, BackupUnlock::Legacy) => {
+            (FULL_LEGACY_PASSPHRASE, FULL_LEGACY_KDF_ITERATIONS, &[])
+        }
+        (FULL_LEGACY_FILE_VERSION, BackupUnlock::Password { .. }) => {
+            anyhow::bail!("This is an older backup. Choose Legacy backup to restore it.");
+        }
+        (FULL_PASSWORD_FILE_VERSION, BackupUnlock::Legacy) => {
+            anyhow::bail!("This backup requires a password. Choose Password-protected backup.");
+        }
+        (version, _) => anyhow::bail!("Unsupported encrypted file version: {version}"),
+    };
 
     let salt_start = 5;
     let nonce_start = salt_start + FULL_SALT_LEN;
@@ -635,12 +685,21 @@ fn decode_full_encrypted_store(
     let nonce = &file_bytes[nonce_start..ciphertext_start];
     let ciphertext = &file_bytes[ciphertext_start..];
 
-    let key = derive_encryption_key(passphrase, salt);
+    let key = derive_encryption_key(password, salt, iterations);
     let cipher = XChaCha20Poly1305::new((&key).into());
     let compressed = cipher
-        .decrypt(XNonce::from_slice(nonce), ciphertext)
-        .map_err(|_| {
-            anyhow::anyhow!("Failed to decrypt file (wrong passphrase or corrupted file)")
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| match unlock {
+            BackupUnlock::Password { .. } => {
+                anyhow::anyhow!("The password is incorrect or the backup is damaged")
+            }
+            BackupUnlock::Legacy => anyhow::anyhow!("The legacy backup is damaged or invalid"),
         })?;
 
     let json = decompress_bytes_with_limit(&compressed, MAX_IMPORT_JSON_BYTES)
@@ -652,9 +711,9 @@ fn decode_full_encrypted_store(
     Ok(store)
 }
 
-fn derive_encryption_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+fn derive_encryption_key(password: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
     let mut key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, FULL_KDF_ITERATIONS, &mut key);
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut key);
     key
 }
 
@@ -691,13 +750,19 @@ fn write_encrypted_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn read_encrypted_file(path: &str) -> anyhow::Result<Vec<u8>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("Failed to read file metadata: {path}"))?;
-    if metadata.len() > MAX_IMPORT_FILE_BYTES {
+    let file = fs::File::open(path).with_context(|| format!("Failed to open backup: {path}"))?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("Choose a backup file");
+    }
+    let mut encrypted = Vec::new();
+    file.take(MAX_IMPORT_FILE_BYTES + 1)
+        .read_to_end(&mut encrypted)
+        .with_context(|| format!("Failed to read backup: {path}"))?;
+    if encrypted.len() as u64 > MAX_IMPORT_FILE_BYTES {
         anyhow::bail!("Encrypted file is too large");
     }
 
-    fs::read(path).with_context(|| format!("Failed to read file: {path}"))
+    Ok(encrypted)
 }
 
 fn validate_imported_store(store: &AccountsStore) -> anyhow::Result<()> {
@@ -789,4 +854,83 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod backup_protection_tests {
+    use super::*;
+
+    fn fixture() -> AccountsStore {
+        let account = StoredAccount::new_api_key("Fixture".into(), "fake-key-for-test".into());
+        AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            masked_account_ids: vec![account.id.clone()],
+            accounts: vec![account],
+            ..AccountsStore::default()
+        }
+    }
+
+    fn with_password(password: &str) -> BackupUnlock {
+        BackupUnlock::Password {
+            password: password.into(),
+        }
+    }
+
+    fn assert_same_store(actual: &AccountsStore, expected: &AccountsStore) {
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn password_backup_round_trips_and_rejects_wrong_password_and_tampering() {
+        let store = fixture();
+        let password = "  fixture password 🦊  ";
+        let mut bytes = encode_full_encrypted_store(&store, password).unwrap();
+        assert_eq!(&bytes[..5], b"CSWF\x02");
+        let restored = decode_full_encrypted_store(&bytes, &with_password(password)).unwrap();
+        assert_same_store(&restored, &store);
+        assert!(decode_full_encrypted_store(&bytes, &with_password(password.trim())).is_err());
+        assert!(decode_full_encrypted_store(&bytes, &BackupUnlock::Legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("requires a password"));
+
+        *bytes.last_mut().unwrap() ^= 0x01;
+        assert!(decode_full_encrypted_store(&bytes, &with_password(password)).is_err());
+        bytes[4] = FULL_LEGACY_FILE_VERSION;
+        assert!(decode_full_encrypted_store(&bytes, &BackupUnlock::Legacy).is_err());
+    }
+
+    #[test]
+    fn legacy_backup_requires_explicit_selection() {
+        // Reproduce the original v1 format: fixed work factor, no header AAD.
+        let store = fixture();
+        let salt = [3u8; FULL_SALT_LEN];
+        let nonce = [4u8; FULL_NONCE_LEN];
+        let key = derive_encryption_key(FULL_LEGACY_PASSPHRASE, &salt, 210_000);
+        let compressed = compress_bytes(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let ciphertext = XChaCha20Poly1305::new((&key).into())
+            .encrypt(XNonce::from_slice(&nonce), compressed.as_slice())
+            .unwrap();
+        let mut bytes = b"CSWF\x01".to_vec();
+        bytes.extend_from_slice(&salt);
+        bytes.extend_from_slice(&nonce);
+        bytes.extend_from_slice(&ciphertext);
+
+        let error = decode_full_encrypted_store(&bytes, &with_password(FULL_LEGACY_PASSPHRASE))
+            .unwrap_err();
+        assert!(error.to_string().contains("Choose Legacy backup"));
+        let restored = decode_full_encrypted_store(&bytes, &BackupUnlock::Legacy).unwrap();
+        assert_same_store(&restored, &store);
+    }
+
+    #[test]
+    fn passwords_must_meet_export_requirements() {
+        assert!(validate_backup_password("           ", true).is_err());
+        assert!(validate_backup_password("🦊🦊🦊", true).is_err());
+        assert!(validate_backup_password("🦊🦊🦊🦊🦊🦊🦊🦊🦊🦊🦊🦊", true).is_ok());
+        assert!(validate_backup_password(&"🦊".repeat(257), true).is_err());
+    }
 }

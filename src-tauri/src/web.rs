@@ -11,13 +11,13 @@ use tokio::runtime::Runtime;
 
 use crate::commands::{
     add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, fetch_claude_prometheus, fetch_claude_seats, fetch_claude_usage,
-    fetch_usage, get_account_usage_stats, get_active_account_info, get_masked_account_ids,
-    get_provider_access, get_use_next_plan, import_accounts_full_encrypted_bytes,
-    import_accounts_slim_text, kill_codex_processes, list_accounts, refresh_account_metadata,
-    refresh_all_accounts_usage, rename_account, save_provider_dates, set_masked_account_ids,
-    start_login, switch_account, warmup_account, warmup_all_accounts, PlanDates,
+    complete_login, delete_account, export_accounts_full_encrypted_bytes, fetch_claude_prometheus,
+    fetch_claude_seats, fetch_claude_usage, fetch_usage, get_account_usage_stats,
+    get_active_account_info, get_masked_account_ids, get_provider_access, get_use_next_plan,
+    import_accounts_full_encrypted_bytes, kill_codex_processes, list_accounts,
+    refresh_account_metadata, refresh_all_accounts_usage, rename_account, save_provider_dates,
+    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
+    BackupUnlock, PlanDates,
 };
 use crate::types::UsageInfo;
 
@@ -52,11 +52,6 @@ struct UseNextArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct ImportSlimArgs {
-    payload: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct MaskedIdsArgs {
     ids: Vec<String>,
 }
@@ -74,11 +69,12 @@ struct UploadAuthJsonArgs {
     contents: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UploadEncryptedArgs {
     #[serde(alias = "contents_base64")]
     contents_base64: String,
+    unlock: BackupUnlock,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,7 +115,33 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
 
     if method == Method::Post && url.starts_with("/api/invoke/") {
         let command = url.trim_start_matches("/api/invoke/");
-        let payload = parse_request_json(&mut request)?;
+        let is_backup = matches!(
+            command,
+            "export_accounts_full_encrypted_bytes" | "import_accounts_full_encrypted_bytes"
+        );
+        let payload = if is_backup {
+            if !is_local_backup_request(&request) {
+                respond_json(
+                    request,
+                    StatusCode(403),
+                    &json!({ "error": "Backups are available in the desktop app or from a local browser." }),
+                )?;
+                return Ok(());
+            }
+            match parse_backup_request_json(&mut request) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    respond_json(
+                        request,
+                        StatusCode(400),
+                        &json!({ "error": "Invalid backup request." }),
+                    )?;
+                    return Ok(());
+                }
+            }
+        } else {
+            parse_request_json(&mut request)?
+        };
         let result = runtime.block_on(invoke_web_command(command, payload));
         match result {
             Ok(value) => respond_json(request, StatusCode(200), &value)?,
@@ -169,6 +191,24 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         // Native process launch stays on the local desktop, never the LAN web route.
         "get_claude_usage" => fetch_claude_usage().await,
         "get_claude_seats" => fetch_claude_seats().await,
+        "set_claude_seat_archived" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+                archived: bool,
+            }
+            let args: Args = parse_args(payload)?;
+            to_json(crate::commands::set_claude_seat_archived(args.id, args.archived).await?)
+        }
+        "update_provider_plan" => {
+            #[derive(Deserialize)]
+            struct Args {
+                plan: PlanDates,
+            }
+            let args: Args = parse_args(payload)?;
+            crate::commands::update_provider_plan(args.plan).await?;
+            Ok(Value::Null)
+        }
         "get_claude_prometheus" => fetch_claude_prometheus().await,
         "get_use_next_plan" => {
             let args: UseNextArgs = parse_args(payload)?;
@@ -210,21 +250,23 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         }
         "complete_login" => to_json(complete_login().await?),
         "cancel_login" => to_json(cancel_login().await?),
-        "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),
-        "import_accounts_slim_text" => {
-            let args: ImportSlimArgs = parse_args(payload)?;
-            to_json(import_accounts_slim_text(args.payload).await?)
-        }
         "export_accounts_full_encrypted_bytes" => {
-            let encoded = STANDARD.encode(export_accounts_full_encrypted_bytes().await?);
+            #[derive(Deserialize)]
+            struct Args {
+                password: String,
+            }
+            let args: Args = parse_args(payload).map_err(|_| "Enter the backup password")?;
+            let encoded =
+                STANDARD.encode(export_accounts_full_encrypted_bytes(args.password).await?);
             to_json(encoded)
         }
         "import_accounts_full_encrypted_bytes" => {
-            let args: UploadEncryptedArgs = parse_args(payload)?;
+            let args: UploadEncryptedArgs =
+                parse_args(payload).map_err(|_| "Invalid backup request")?;
             let bytes = STANDARD
                 .decode(args.contents_base64)
-                .map_err(|error| format!("Failed to decode uploaded backup: {error}"))?;
-            to_json(import_accounts_full_encrypted_bytes(bytes).await?)
+                .map_err(|_| "Failed to decode uploaded backup")?;
+            to_json(import_accounts_full_encrypted_bytes(bytes, args.unlock).await?)
         }
         "get_masked_account_ids" => to_json(get_masked_account_ids().await?),
         "set_masked_account_ids" => {
@@ -237,6 +279,106 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(kill_codex_processes(args.reopen_desktop, args.force_close).await?)
         }
         _ => Err(format!("Unsupported web command: {command}")),
+    }
+}
+
+fn is_local_backup_request(request: &Request) -> bool {
+    request
+        .remote_addr()
+        .is_some_and(|addr| addr.ip().to_canonical().is_loopback())
+        && request
+            .headers()
+            .iter()
+            .any(|header| header.field.equiv("Host") && is_loopback_host(header.value.as_str()))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if port.parse::<u16>().is_ok() => name,
+        _ => host,
+    };
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "[::1]")
+}
+
+fn parse_backup_request_json(request: &mut Request) -> anyhow::Result<Value> {
+    use std::io::Read;
+
+    // Requiring JSON prevents cross-origin form posts to this local endpoint.
+    if !request.headers().iter().any(|header| {
+        header.field.equiv("Content-Type")
+            && header
+                .value
+                .as_str()
+                .split(';')
+                .next()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+    }) {
+        anyhow::bail!("Backup request must be JSON");
+    }
+
+    // The backup parser limits decoded files to 8 MiB. Allow base64 overhead.
+    const MAX_REQUEST_BYTES: u64 = 12 * 1024 * 1024;
+    let mut body = Vec::new();
+    request
+        .as_reader()
+        .take(MAX_REQUEST_BYTES + 1)
+        .read_to_end(&mut body)?;
+    if body.len() as u64 > MAX_REQUEST_BYTES {
+        anyhow::bail!("Backup request is too large");
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+#[cfg(test)]
+mod backup_web_tests {
+    use super::*;
+    use tiny_http::TestRequest;
+
+    fn backup_request(remote: &str, host: &str, content_type: &str) -> Request {
+        TestRequest::new()
+            .with_method(Method::Post)
+            .with_remote_addr(remote.parse().unwrap())
+            .with_header(format!("Host: {host}").parse().unwrap())
+            .with_header(format!("Content-Type: {content_type}").parse().unwrap())
+            .with_body(r#"{"password":"synthetic backup password"}"#)
+            .into()
+    }
+
+    #[test]
+    fn backup_web_requires_both_local_peer_and_local_host() {
+        assert!(is_local_backup_request(&backup_request(
+            "127.0.0.1:1234",
+            "localhost:3210",
+            "application/json"
+        )));
+        assert!(is_local_backup_request(&backup_request(
+            "[::1]:1234",
+            "[::1]:3210",
+            "application/json"
+        )));
+        assert!(!is_local_backup_request(&backup_request(
+            "192.0.2.1:1234",
+            "localhost:3210",
+            "application/json"
+        )));
+        assert!(!is_local_backup_request(&backup_request(
+            "127.0.0.1:1234",
+            "backup.example:3210",
+            "application/json"
+        )));
+    }
+
+    #[test]
+    fn backup_web_does_not_accept_cross_origin_form_content_types() {
+        let mut form_request = backup_request("127.0.0.1:1234", "localhost:3210", "text/plain");
+        assert!(parse_backup_request_json(&mut form_request).is_err());
+
+        let mut json_request = backup_request(
+            "127.0.0.1:1234",
+            "localhost:3210",
+            "application/json; charset=utf-8",
+        );
+        assert!(parse_backup_request_json(&mut json_request).is_ok());
     }
 }
 

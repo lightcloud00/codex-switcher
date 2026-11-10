@@ -224,21 +224,48 @@ ChatGPT account cards show **Re-login** for a 401 or an invalid, expired, or reu
 For the active account, close Codex or switch to another account first. Switcher checks this again before saving so a running Codex process cannot overwrite the renewed credentials. Inactive accounts can be renewed while Codex stays open. Cancel leaves the saved credentials unchanged. API-key accounts do not use this OAuth flow.
 
 
-### Claude seat visibility and dates
+### Account visibility and dates
 
-Claude accounts can be hidden locally without signing out or editing the fleet registry.
-Create `codex-switcher/claude-seats.json` in the OS configuration directory
-(`~/Library/Application Support` on macOS, `%APPDATA%` on Windows, `~/.config` on Linux):
+In **Claude → Manage accounts**, use **Archive** or **Restore** to choose which seats
+appear in Claude, Overview and newly refreshed capacity snapshots. Archiving keeps the
+login and subscription. Preferences live in `codex-switcher/claude-seats.json` in the
+OS configuration directory (`~/Library/Application Support` on macOS, `%APPDATA%` on
+Windows, `~/.config` on Linux). A failed visibility refresh preserves the last list;
+if no list has loaded, seats stay unavailable until visibility can be read.
 
-```json
-{"hidden_seat_ids": ["claude-windows", "claude-wsl"]}
-```
+**Edit dates** records the billing interval, renewal date, subscription end date,
+evidence source and last verification date. These use the same `provider-dates.json`
+store as Providers. A date with a source and verification date is labeled **Confirmed**;
+other manually entered dates say **Recorded**. The app does not fetch billing receipts.
+When only a paid subscription start date is available, the next monthly anniversary
+is explicitly an **estimated monthly renewal**. Annual/free settings suppress that
+monthly estimate. Unknown dates stay unrecorded.
 
-Refresh the Claude tab. Hidden seats and their duplicate usage aliases are omitted from
-Claude, Overview and newly exported capacity snapshots. Remove an ID from the preference
-to show it again. The preference contains seat IDs only, never credentials.
+Overview separates the current Codex login from availability. Missing usage is unknown,
+old usage is stale, and Claude's remaining allowance reflects its limiting current
+5-hour or weekly window. Compact rows fit the supported narrow window without horizontal
+scrolling; probe errors are available under Details.
 
-Dates saved under Providers take precedence. When only a subscription start date is
-available, the app labels the next monthly anniversary as an **estimated monthly renewal**.
-This assumes monthly billing; it is not a verified renewal, cancellation or expiry date.
-Unknown dates stay explicitly unrecorded and free accounts receive no invented renewal.
+### Protected backups and saves
+
+Choose **Account → Export Password-Protected Backup**, then enter and confirm a password
+of at least 12 characters. New files use a salted PBKDF2-HMAC-SHA256 key and authenticated
+XChaCha20-Poly1305 encryption. Keep the password separately: Switcher does not retain it.
+**Restore Backup** imports missing accounts and preserves existing ones. Older files
+require the explicit **Legacy backup (created without a password)** choice. Raw token
+text export is no longer offered in the UI or LAN API. Backup operations are available
+in the desktop app and local loopback browser only.
+
+Account and settings saves use private temporary files and atomic replacement. Account
+saves retain three private rotating local backups. These local recovery files are
+separate from password-protected exports.
+
+### Opt-in conversation recovery
+
+The upstream recovery implementation is integrated. In Settings, enable **Auto-resume
+interrupted conversations after switching** together with desktop reopening. It is off
+by default. Recovery prepares eligible interrupted conversations before an explicit
+close/switch/reopen, resumes them only after reopening succeeds, and reports consumed,
+skipped, failed or timed-out results. Queue acceptance alone is not reported as recovery.
+The implementation retains retry receipts to avoid duplicate resumes. Enabling the
+setting does not switch accounts or close a current session.

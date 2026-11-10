@@ -3,6 +3,10 @@ export interface PlanDates {
   billingRenewsOn: string | null;
   creditExpiresOn: string | null;
   credentialExpiresOn: string | null;
+  subscriptionExpiresOn?: string | null;
+  billingInterval?: "unknown" | "monthly" | "annual" | "none" | null;
+  evidenceSource?: string | null;
+  lastVerifiedOn?: string | null;
 }
 export const PLAN_LABELS: Record<string, string> = {
   "x-subscription": "X Subscription · Grok + Cursor (shared allowance)",
