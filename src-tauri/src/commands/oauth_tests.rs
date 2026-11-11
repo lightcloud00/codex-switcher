@@ -286,10 +286,19 @@ fn relogin_matches_user_and_workspace_and_fails_closed_without_identity() {
     assert!(validate_relogin_identity(&user("u1", "w1"), &user("u2", "w1")).is_err());
     assert!(validate_relogin_identity(&user("u1", "w1"), &user("u1", "w2")).is_err());
     assert!(validate_relogin_identity(&user("u1", ""), &user("u1", "")).is_err());
-    assert!(validate_relogin_identity(&account("same"), &account("same")).is_err());
-    let mut old = account("same");
+    fn without_user_identity() -> StoredAccount {
+        let mut a = account("same");
+        if let AuthData::ChatGPT { id_token, .. } = &mut a.auth_data {
+            // The common fixture has a valid subject. Remove it explicitly to
+            // exercise unknown identity and the email fallback below.
+            *id_token = "opaque-test-id-without-claims".into();
+        }
+        a
+    }
+    assert!(validate_relogin_identity(&without_user_identity(), &without_user_identity()).is_err());
+    let mut old = without_user_identity();
     old.email = Some("old@example.test".into());
-    let mut new = account("same");
+    let mut new = without_user_identity();
     new.email = Some("new@example.test".into());
     assert!(validate_relogin_identity(&old, &new).is_err());
     assert!(validate_relogin_identity(

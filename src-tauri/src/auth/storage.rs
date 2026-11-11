@@ -745,7 +745,10 @@ mod tests {
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-a1");
 
         let mut auth_without_identity = auth("workspace-a", "unknown");
-        auth_without_identity.tokens.as_mut().unwrap().account_id = None;
+        // Neither the top-level field nor the JWT may identify this login.
+        let tokens = auth_without_identity.tokens.as_mut().unwrap();
+        tokens.id_token = "opaque-id-token".into();
+        tokens.account_id = None;
         assert!(!sync_active_account_tokens(
             &mut store,
             &auth_without_identity
