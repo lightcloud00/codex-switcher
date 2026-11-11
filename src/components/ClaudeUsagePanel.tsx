@@ -17,6 +17,7 @@ import {
   noReadingLine,
   planLabel,
   SEAT_HEALTH_PROBLEM_STATES,
+  SEAT_NOT_WORKING,
   seatStatusLabel,
   seatSubtitle,
   seatTitle,
@@ -151,7 +152,7 @@ function SeatCard({
               <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${BADGE_NEUTRAL}`}>{plan}</span>
             )}
             <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_BADGE[seat.status]}`}>
-              {seatStatusLabel(seat.status)}
+              {seat.promState === "broken" ? SEAT_NOT_WORKING : seatStatusLabel(seat.status)}
             </span>
           </div>
           {(showHealth || seat.lockOrphaned) && (

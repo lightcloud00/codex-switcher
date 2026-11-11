@@ -417,6 +417,11 @@ export function AccountUsageStats({
     void loadStats(true);
   }, [enabled, loadStats, open, usage, usageLoading]);
 
+  // Run the stats call once when the panel opens, so "Loading usage stats…" always ends.
+  useEffect(() => {
+    if (open && !attempted && !loading) void loadStats();
+  }, [open, attempted, loading, loadStats]);
+
   const currentStats = stats?.account_id === accountId ? stats : null;
   const generatedAt = currentStats ? formatGeneratedAt(currentStats.generated_at) : "";
   const todayTokens = currentStats ? sumDays(currentStats.daily, 1) : null;
