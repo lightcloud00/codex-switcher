@@ -48,16 +48,9 @@ pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
     let content =
         serde_json::to_string_pretty(&auth_json).context("Failed to serialize auth.json")?;
 
-    fs::write(&auth_path, content)
+    // Atomic, and 0600 from the first byte: no half-written or readable window.
+    super::storage::atomic_write_private(&auth_path, content.as_bytes(), 0)
         .with_context(|| format!("Failed to write auth.json: {}", auth_path.display()))?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&auth_path, perms)?;
-    }
 
     Ok(())
 }
@@ -154,7 +147,9 @@ pub fn has_active_login() -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::import_from_auth_json_contents;
+    use super::{get_codex_auth_file, import_from_auth_json_contents, switch_to_account};
+    use crate::auth::test_support::TestHome;
+    use crate::types::StoredAccount;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use serde_json::json;
 
@@ -197,5 +192,32 @@ mod tests {
             import_from_auth_json_contents(&auth_json(json!({}), "acct-87654321"), "".into())
                 .unwrap();
         assert_eq!(account.name, "ChatGPT account (87654321)");
+    }
+
+    #[test]
+    fn switch_replaces_existing_auth_file_atomically_with_private_mode() {
+        let _home = TestHome::new();
+        let path = get_codex_auth_file().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "old contents").unwrap();
+
+        let account = StoredAccount::new_api_key("Key".into(), "sk-test".into());
+        switch_to_account(&account).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["OPENAI_API_KEY"], "sk-test");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        // No temp file left behind.
+        let leftovers = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name() != "auth.json")
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }

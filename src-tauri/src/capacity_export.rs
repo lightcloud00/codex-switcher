@@ -166,23 +166,24 @@ fn account_alias_hash(account_id: &str) -> String {
 }
 
 fn safe_plan_class(value: Option<String>) -> String {
-    match value
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("free") => "free",
-        Some("plus") => "plus",
-        Some("pro") => "pro",
-        Some("team") => "team",
-        Some("business") => "business",
-        Some("enterprise") => "enterprise",
-        Some("edu") => "edu",
-        Some("api_key") => "api",
-        _ => "unknown",
+    let plan = value.as_deref().map(str::trim).map(str::to_ascii_lowercase);
+    let Some(plan) = plan else {
+        return "unknown".to_string();
+    };
+    match plan.as_str() {
+        "api_key" => "api".to_string(),
+        // Known classes and any other short plain word (for example "promax") pass through unchanged.
+        other if is_plan_word(other) => other.to_string(),
+        _ => "unknown".to_string(),
     }
-    .to_string()
+}
+
+/// `^[a-z][a-z0-9_-]{0,23}$`: a plain lowercase word, so nothing odd reaches the capacity export.
+fn is_plan_word(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
+        && value.len() <= 24
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 fn unix_time(value: Option<i64>) -> Option<DateTime<Utc>> {
@@ -644,6 +645,30 @@ mod tests {
     use super::*;
     use crate::commands::{parse_claude_usage, parse_seat_registry};
     use crate::types::StoredAccount;
+
+    #[test]
+    fn plan_class_keeps_known_values_and_passes_plain_words() {
+        let class = |value: &str| safe_plan_class(Some(value.to_string()));
+        assert_eq!(class("pro"), "pro");
+        assert_eq!(class(" Plus "), "plus");
+        assert_eq!(class("api_key"), "api");
+        assert_eq!(class("promax"), "promax");
+        assert_eq!(class("PROMAX"), "promax");
+        assert_eq!(class("pro-max_2"), "pro-max_2");
+        assert_eq!(safe_plan_class(None), "unknown");
+    }
+
+    #[test]
+    fn plan_class_rejects_odd_values() {
+        let class = |value: &str| safe_plan_class(Some(value.to_string()));
+        assert_eq!(class("Pro Max!"), "unknown");
+        assert_eq!(class(&"a".repeat(40)), "unknown");
+        assert_eq!(class(&"a".repeat(25)), "unknown");
+        assert_eq!(class(&"a".repeat(24)), "a".repeat(24));
+        assert_eq!(class("1pro"), "unknown");
+        assert_eq!(class(""), "unknown");
+        assert_eq!(class("a@b.com"), "unknown");
+    }
 
     #[test]
     fn projection_never_serializes_account_identity_or_credentials() {

@@ -215,10 +215,26 @@ test("a passed end date marks a seat ended only while nothing reads it now", () 
   const idle = claudeNextRow(seat({ sevenDay: win(10, null, "stale", 90_000), lastReadAgeS: 90_000 }), passed, NOW, FORMAT);
   assert.equal(idle.badge.label, "Plan ended");
   assert.equal(idle.badge.tone, "muted");
+  assert.equal(idle.leftPercent, null);
+  assert.equal(idle.backAt, null);
+  assert.deepEqual(idle.resets, []);
+  assert.equal(claudeRowLine(idle, NOW, FORMAT), "Renew to use it again");
   // Still read now: a renewal the seat file has not caught up with. Keep the usage badge; the plan line asks to check.
   const live = claudeNextRow(seat({ sevenDay: win(30, "2026-11-14T22:00:00Z") }), passed, NOW, FORMAT);
   assert.equal(live.badge.label, "Ready");
   assert.equal(live.planEnd.text, "Plan ended Nov 1 · check it");
+});
+
+test("a stale or reset 100% window does not make a seat with a current lower reading Empty", () => {
+  const row = claudeNextRow(
+    seat({ status: "ok", fiveHour: win(100, "2026-11-10T00:00:00Z", "stale", 90_000), sevenDay: win(30, "2026-11-14T22:00:00Z") }),
+    undefined,
+    NOW,
+    FORMAT,
+  );
+  assert.equal(row.badge.label, "Ready");
+  assert.equal(row.backAt, null);
+  assert.equal(row.leftPercent, 70);
 });
 
 test("a saved credit or key expiry leaves the seat file's end date in place", () => {

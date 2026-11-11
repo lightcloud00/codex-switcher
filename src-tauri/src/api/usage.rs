@@ -368,6 +368,7 @@ async fn send_chatgpt_get_request(
 
     client
         .get(url)
+        .timeout(std::time::Duration::from_secs(20))
         .headers(headers)
         .send()
         .await

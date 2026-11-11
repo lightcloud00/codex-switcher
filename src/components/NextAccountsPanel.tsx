@@ -13,11 +13,13 @@ import {
   formatAgo,
   formatClock,
   formatCountdown,
+  failedCheckText,
   formatIn,
   heroPick,
   lastChecked,
   leftText,
   MARKED_DAYS,
+  needsRelogin,
   NONE,
   planEntries,
   planLine,
@@ -98,6 +100,8 @@ interface NextAccountsPanelProps {
   maskedAccountIds?: ReadonlySet<string>;
   /** Opens Codex on the account: a switch through App's usual path first when it is not the active one. */
   onOpen: (accountId: string) => void;
+  /** Starts App's usual Codex re-login for the account; rows whose login is dead offer it. */
+  onRelogin?: (accountId: string) => void;
   /** The account a switch or open is running for; every button waits while one runs. */
   openingId?: string | null;
   disabled?: boolean;
@@ -116,6 +120,7 @@ export function NextAccountsPanel({
   masked = false,
   maskedAccountIds = NO_IDS,
   onOpen,
+  onRelogin,
   openingId = null,
   disabled = false,
   canOpenCodex,
@@ -231,6 +236,7 @@ export function NextAccountsPanel({
                   now={now}
                   blur={blurFor(entry.account.id)}
                   onOpen={onOpen}
+                  onRelogin={onRelogin}
                   opening={openingId === entry.account.id}
                   disabled={busy}
                   canOpenCodex={canOpenCodex}
@@ -448,6 +454,7 @@ function AccountRow({
   now,
   blur,
   onOpen,
+  onRelogin,
   opening,
   disabled,
   canOpenCodex,
@@ -458,6 +465,7 @@ function AccountRow({
   now: number;
   blur: boolean;
   onOpen: (accountId: string) => void;
+  onRelogin?: (accountId: string) => void;
   opening: boolean;
   disabled: boolean;
   canOpenCodex: boolean;
@@ -469,6 +477,8 @@ function AccountRow({
   const button = openLabel(active, opening, canOpenCodex);
   const held = row.status === "expired" || row.status === "no_usage" || row.status === "refresh_failed";
   const line = rowLine(entry, now);
+  // A dead login: switching to it would leave Codex signed out, so the row offers a sign-in instead.
+  const signIn = needsRelogin(entry) && onRelogin !== undefined;
   const plan = planLine(row, now);
   const detailsId = `use-next-details-${row.position}`;
 
@@ -502,15 +512,27 @@ function AccountRow({
           )}
         </p>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onOpen(account.id)}
-            disabled={disabled || (active && !canOpenCodex)}
-            title={button.title}
-            className={SECONDARY_BUTTON}
-          >
-            {button.label}
-          </button>
+          {signIn ? (
+            <button
+              type="button"
+              onClick={() => onRelogin(account.id)}
+              disabled={disabled}
+              title="Sign in to this account again"
+              className={SECONDARY_BUTTON}
+            >
+              Sign in again
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onOpen(account.id)}
+              disabled={disabled || (active && !canOpenCodex)}
+              title={button.title}
+              className={SECONDARY_BUTTON}
+            >
+              {button.label}
+            </button>
+          )}
           <button
             type="button"
             onClick={onToggleDetails}
@@ -567,7 +589,13 @@ function AccountDetails({ id, entry, now, blur }: { id: string; entry: UseNextEn
       <dt className="font-medium text-gray-600 dark:text-gray-400">Plan</dt>
       <dd>{planText(row, now)}</dd>
       <dt className="font-medium text-gray-600 dark:text-gray-400">Checked</dt>
-      <dd>{checked === null ? NONE : `${formatAgo(checked, now)} · ${formatClock(checked, now)}`}</dd>
+      <dd>
+        {row.status === "refresh_failed"
+          ? failedCheckText(null, now)
+          : checked === null
+            ? NONE
+            : `${formatAgo(checked, now)} · ${formatClock(checked, now)}`}
+      </dd>
       <dt className="font-medium text-gray-600 dark:text-gray-400">Why here</dt>
       <dd>{whyText(row)}</dd>
     </dl>

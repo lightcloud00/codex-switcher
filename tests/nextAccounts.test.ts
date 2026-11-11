@@ -10,8 +10,10 @@ import {
   formatIn,
   formatWhen,
   heroPick,
+  failedCheckText,
   lastChecked,
   leftText,
+  needsRelogin,
   NONE,
   planEntries,
   planInputKey,
@@ -377,4 +379,31 @@ test("usagesForPlan and planInputKey follow the loaded readings", () => {
   assert.notEqual(planInputKey([{ ...withUsage, usageCheckedAt: NOW + 60_000 }, without]), before);
   assert.notEqual(planInputKey([{ ...withUsage, is_active: true }, without]), before);
   assert.notEqual(planInputKey([withUsage, { ...without, subscription_expires_at: "2026-12-01T00:00:00Z" }]), before);
+});
+
+test("a failed check names the cause: signed out says sign in again, a network error keeps the generic line", () => {
+  const ended = entry({ status: "refresh_failed" }, { usage: usage({ error: "refresh_token_invalidated: session has ended" }) });
+  assert.equal(rowLine(ended, NOW, ET), "Signed out — sign in again");
+  assert.equal(needsRelogin(ended), true);
+  const expired = entry({ status: "refresh_failed" }, { usage: usage({ error: "token_expired" }) });
+  assert.equal(rowLine(expired, NOW, ET), "Session expired — sign in again");
+  const network = entry({ status: "refresh_failed" }, { usage: usage({ error: "error sending request: connection timed out" }) });
+  assert.equal(rowLine(network, NOW, ET), "Couldn't check usage · refresh or sign in again");
+  assert.equal(needsRelogin(network), false);
+  const noUsage = entry({ status: "refresh_failed" }, { usage: undefined });
+  assert.equal(rowLine(noUsage, NOW, ET), "Couldn't check usage · refresh or sign in again");
+  assert.equal(needsRelogin(noUsage), false);
+  // An auth error on a row that is not failed (a stale error) does not ask for a sign-in.
+  assert.equal(needsRelogin(entry({ status: "clean" }, { usage: usage({ error: "token_expired" }) })), false);
+});
+
+test("a failed check is not called a check just now", () => {
+  assert.equal(failedCheckText(null, NOW), "Last check failed");
+  assert.equal(failedCheckText(NOW - 2 * 3_600_000, NOW), "Last check failed · last good reading 2 hours ago");
+});
+
+test("planText prints Pro Max for promax and keeps other classes capitalized", () => {
+  assert.equal(planText(row({ plan_class: "promax", subscription_expires_at: null }), NOW, ET), "Pro Max");
+  assert.equal(planText(row({ plan_class: "plus", subscription_expires_at: null }), NOW, ET), "Plus");
+  assert.equal(planText(row({ plan_class: "unknown", subscription_expires_at: null }), NOW, ET), "Plan unknown");
 });

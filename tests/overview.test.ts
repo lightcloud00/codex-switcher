@@ -484,3 +484,11 @@ test("confirmed annual renewal is shown before an interval fallback", () => {
 test("cold-start visibility failure never exposes usage-only Claude rows", () => {
   assert.deepEqual(claudeSeatsFromSources({ accounts: [{ account: "windows-max" }] } as any, null, null, NOW), []);
 });
+
+test("a broken Claude seat shows a dash, not a stale percent", () => {
+  const stale = week({ used_pct: 0, state: "stale" });
+  const [r] = buildClaudeRows([seat({ promState: "broken", sevenDay: stale })], [], NOW);
+  assert.equal(r.left, NONE);
+  const [ok] = buildClaudeRows([seat({ promState: "ok", sevenDay: stale })], [], NOW);
+  assert.equal(ok.left, "100% (stale)");
+});
