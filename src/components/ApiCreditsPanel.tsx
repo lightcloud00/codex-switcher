@@ -24,7 +24,7 @@ export function ApiCreditsPanel() {
   useEffect(() => { void refresh(); }, []);
   const desktop = isTauriRuntime();
   return <section aria-label="API credits" className="space-y-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">API credits</h2>{desktop && <button onClick={() => void refresh()} className="rounded-lg border px-3 py-2 text-sm">{loading ? "Checking… (tap to restart)" : "Refresh"}</button>}</div>
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">API credits</h2>{desktop && <button onClick={() => void refresh()} disabled={loading} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">{loading ? "Checking…" : "Refresh"}</button>}</div>
     {!desktop && <p className="text-sm text-gray-500">API credits are checked from the desktop app only.</p>}
     {error && <p role="alert" className="flex flex-wrap items-center gap-3 text-red-600 dark:text-red-300">{error}<button onClick={() => void refresh()} className="rounded-lg border px-3 py-1.5 text-sm">Retry</button></p>}
     {loading && !data && <p role="status" className="text-sm text-gray-500">Checking providers through CredVault…</p>}

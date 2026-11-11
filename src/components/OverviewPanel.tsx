@@ -242,9 +242,12 @@ export function OverviewPanel({
             void loadCredits(true);
             void loadClient(true);
           }}
-          className="h-9 rounded-lg bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900"
+          // Each check now ends by its deadline, so waiting is short; a second click would start a second
+          // CredVault probe beside the first and both could fail on "broker busy".
+          disabled={busy}
+          className="h-9 rounded-lg bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-black dark:hover:bg-neutral-900"
         >
-          {busy ? "Refreshing… (tap to restart)" : "Refresh"}
+          {busy ? "Refreshing…" : "Refresh"}
         </button>
       </div>
 

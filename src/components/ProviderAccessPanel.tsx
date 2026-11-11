@@ -49,7 +49,7 @@ export function ProviderAccessPanel() {
   // One line per plan that has any date set, shown while the editor is closed.
   const dateSummaries = (data?.plans ?? []).map(p => ({ id: p.id, text: planDatesText(p) })).filter(s => s.text);
   return <section aria-label="Provider access" className="space-y-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} className="rounded-lg border px-3 py-2 text-sm">{busy ? "Refreshing… (tap to restart)" : checking ? "Checking sign-in… (tap to restart)" : "Refresh local status"}</button></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} disabled={busy || checking} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">{busy ? "Refreshing…" : checking ? "Checking sign-in…" : "Refresh local status"}</button></div>
     {error && <p role="alert" className="flex flex-wrap items-center gap-3 text-red-600 dark:text-red-300">{error}<button onClick={() => void refresh()} className="rounded-lg border px-3 py-1.5 text-sm">Retry</button></p>}
     {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
     <div className="grid gap-3 md:grid-cols-3">{data?.providers.map(p => <article key={p.id} className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-3">
@@ -90,7 +90,7 @@ export function ProviderAccessPanel() {
               {p[key] && <button type="button" aria-label={`Clear ${PLAN_LABELS[p.id]} ${label}`} onClick={() => edit(p.id, key, "")} className="rounded border px-1.5 py-0.5">Clear</button>}</div>
           </div>;
         })}
-      </div></fieldset>)}<div className="flex items-center gap-3"><button disabled={saving || !data || !unsavedDates} onClick={() => void save()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Save dates</button>{unsavedDates && <span className="text-sm text-amber-700 dark:text-amber-300">Unsaved changes</span>}</div>
+      </div></fieldset>)}<div className="flex items-center gap-3"><button disabled={saving || busy || !data || !unsavedDates} onClick={() => void save()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Save dates</button>{unsavedDates && <span className="text-sm text-amber-700 dark:text-amber-300">Unsaved changes</span>}</div>
       </div></details>
     </div>
     {data && <p className="text-xs text-gray-500">Local check: {new Date(data.checkedAt).toLocaleString()}. CLI discovery does not prove model, shell, MCP or file access.</p>}
