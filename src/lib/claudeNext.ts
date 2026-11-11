@@ -154,8 +154,8 @@ export function claudeNextRow(seat: ClaudeSeat, dates: PlanDates | undefined, no
   const current = read.filter((w) => w.state === "current");
   const usable = current.length > 0 ? current : read;
   const used = usable.length > 0 ? Math.max(...usable.map((w) => w.used_pct as number)) : null;
-  const resets = claudeResets(seat, now, format);
-  const full = read.filter((w) => (w.used_pct as number) >= 100);
+  // Full is judged on the windows that count now, so an old 100% from a reset window cannot make the seat Empty.
+  const full = usable.filter((w) => (w.used_pct as number) >= 100);
   const empty = full.length > 0 || seat.status === "exhausted";
   const fullResets = full.map((w) => toMs(w.resets_at));
   const backAt =
@@ -163,16 +163,19 @@ export function claudeNextRow(seat: ClaudeSeat, dates: PlanDates | undefined, no
       ? Math.max(...(fullResets as number[]))
       : null;
   const planEnd = claudePlanEnd(seat, dates, now, format);
+  // A seat whose plan ended and that nothing reads now shows no usage: any percent or reset would be stale.
+  const planEnded = planEnd.ended && current.length === 0;
+  const resets = planEnded ? [] : claudeResets(seat, now, format);
   const old = read.some((w) => w.state !== "current") && seat.lastReadAgeS !== null && seat.lastReadAgeS > OLD_READING_S;
   return {
     id: seat.id,
     title: seatTitle(seat),
     subtitle: seatSubtitle(seat),
     plan: planLabel(seat.plan),
-    badge: badgeFor(seat, empty, planEnd.ended && current.length === 0, used),
+    badge: badgeFor(seat, empty, planEnded, used),
     // A seat that refuses to run has nothing left to use, whatever its last reading said.
-    leftPercent: used === null || seat.promState === "broken" ? null : Math.max(0, Math.round(100 - used)),
-    backAt,
+    leftPercent: used === null || seat.promState === "broken" || planEnded ? null : Math.max(0, Math.round(100 - used)),
+    backAt: planEnded ? null : backAt,
     resets,
     oldReading: old ? formatAgo(now - (seat.lastReadAgeS as number) * 1000, now) : null,
     planEnd,
@@ -200,6 +203,7 @@ export function claudeNextRows(
 
 /** The line under a seat row: when it is back, or its resets; "No reset time" without one. */
 export function claudeRowLine(row: ClaudeNextRow, now: number, format: WhenFormat = {}): string {
+  if (row.badge.label === "Plan ended") return "Renew to use it again";
   if (row.badge.label === "Empty" && row.backAt !== null) return `Back ${formatCountdown(row.backAt, now, format)}`;
   if (row.resets.length === 0) return "No reset time known";
   return row.resets.map((reset) => reset.text).join(" · ");

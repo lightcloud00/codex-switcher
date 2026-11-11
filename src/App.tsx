@@ -1863,6 +1863,10 @@ function App() {
             masked={allMasked}
             maskedAccountIds={maskedAccounts}
             onOpen={(accountId) => void handleOpenFromPlan(accountId)}
+            onRelogin={(accountId) => {
+              const target = accounts.find((item) => item.id === accountId);
+              if (target) setReloginAccount(target);
+            }}
             openingId={switchingId ?? (isOpeningCodex ? activeAccount?.id ?? null : null)}
             disabled={isCompletingForceClose}
             canOpenCodex={isTauriRuntime()}

@@ -249,7 +249,7 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
       account: seatTitle(seat),
       detail: seatSubtitle(seat) || undefined,
       type: plan ? `Claude ${plan}` : "Claude",
-      left: used !== null && limiting?.state === "stale" ? `${left} (stale)` : used === null ? "Unknown" : stale && !exhaustedNow ? `${left} (partial)` : left,
+      left: seat.promState === "broken" ? NONE : used !== null && limiting?.state === "stale" ? `${left} (stale)` : used === null ? "Unknown" : stale && !exhaustedNow ? `${left} (partial)` : left,
       resets: (used !== null && limitBarNotes(limiting, nowMs).countdown) || NONE,
       renews: planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs),
       status: expired ? "expired" : status,

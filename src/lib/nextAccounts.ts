@@ -1,3 +1,4 @@
+import { describeAuthFailure, type AuthFailureKind } from "./accountAuth.ts";
 import type { AccountWithUsage, UsageInfo, UseNextPlan, UseNextRow, UseNextStatus } from "../types";
 
 export const NONE = "—";
@@ -183,6 +184,23 @@ export function leftText(row: UseNextRow): string | null {
   return row.remaining_percent === null ? null : `${Math.round(row.remaining_percent)}% left`;
 }
 
+const SIGN_IN_LINE: Record<AuthFailureKind, string> = {
+  ended: "Signed out — sign in again",
+  expired: "Session expired — sign in again",
+  reused: "Login renewed by another app — sign in again",
+  unauthorized: "Login needs renewing — sign in again",
+};
+
+/** True when the usage check failed because the login is dead: only a fresh sign-in fixes it. */
+export function needsRelogin(entry: UseNextEntry): boolean {
+  return entry.row.status === "refresh_failed" && describeAuthFailure(entry.account.usage?.error) !== null;
+}
+
+/** "Last check failed", plus when the last good reading was, if known. */
+export function failedCheckText(lastGoodAt: number | null, now: number): string {
+  return lastGoodAt === null ? "Last check failed" : `Last check failed · last good reading ${formatAgo(lastGoodAt, now)}`;
+}
+
 /** The one line under a row: what happens to this account next. */
 export function rowLine(entry: UseNextEntry, now: number, format: WhenFormat = {}): string {
   const { row, account } = entry;
@@ -198,8 +216,10 @@ export function rowLine(entry: UseNextEntry, now: number, format: WhenFormat = {
       return ["In use now", resets].filter(Boolean).join(" · ");
     case "exhausted":
       return `Back ${formatCountdown(toMs(row.back_at), now, format)}`;
-    case "refresh_failed":
-      return "Couldn't check usage · refresh or sign in again";
+    case "refresh_failed": {
+      const failure = describeAuthFailure(account.usage?.error);
+      return failure ? SIGN_IN_LINE[failure.kind] : "Couldn't check usage · refresh or sign in again";
+    }
     case "expired":
       return `Plan ended ${formatDay(toMs(row.subscription_expires_at), now, format)} · renew to use`;
     default:
@@ -227,7 +247,12 @@ export function whyText(row: UseNextRow): string {
 
 /** "Pro · ends Nov 30", "Free", or "Pro · ended Sep 5". */
 export function planText(row: UseNextRow, now: number, format: WhenFormat = {}): string {
-  const plan = row.plan_class === "unknown" ? "Plan unknown" : row.plan_class.charAt(0).toUpperCase() + row.plan_class.slice(1);
+  const plan =
+    row.plan_class === "unknown"
+      ? "Plan unknown"
+      : row.plan_class === "promax"
+        ? "Pro Max"
+        : row.plan_class.charAt(0).toUpperCase() + row.plan_class.slice(1);
   const ends = toMs(row.subscription_expires_at);
   if (ends === null) return plan;
   return `${plan} · ${ends <= now ? "ended" : "ends"} ${formatDay(ends, now, format)}`;
