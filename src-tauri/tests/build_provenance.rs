@@ -23,8 +23,16 @@ impl Fixture {
         let repo = sandbox.join("repo");
         fs::create_dir_all(repo.join("src-tauri/src")).unwrap();
         fs::create_dir_all(sandbox.join("empty-hooks")).unwrap();
-        let fixture = Self { sandbox, repo };
+        let mut fixture = Self { sandbox, repo };
         fixture.git(&["init"]);
+        // Git resolves macOS /var aliases; use its path spelling throughout
+        // the fixture so exact watcher and exclusion assertions stay meaningful.
+        let repo = PathBuf::from(fixture.git(&["rev-parse", "--show-toplevel"]));
+        fixture.sandbox = repo
+            .parent()
+            .expect("fixture repository parent")
+            .to_path_buf();
+        fixture.repo = repo;
         fixture.git(&["config", "user.name", "Build Fixture"]);
         fixture.git(&["config", "user.email", "build-fixture@example.com"]);
         fixture.git(&["config", "commit.gpgsign", "false"]);
