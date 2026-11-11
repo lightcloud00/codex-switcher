@@ -13,15 +13,9 @@ import {
   type OverviewRow,
   type OverviewTone,
 } from "../lib/overview";
-import type { PlanDates } from "../lib/providerAccess";
-import type {
-  AccountWithUsage,
-  ClaudePromSnapshot,
-  ClaudeSeatRegistry,
-  ClaudeUsageSummary,
-} from "../types";
+import { useClaudeSources } from "../hooks/useClaudeSources";
+import type { AccountWithUsage } from "../types";
 
-const REFRESH_MS = 60_000;
 // The credit probe runs CredVault and takes seconds, so a tab switch reuses a recent answer.
 const CREDITS_TTL_MS = 5 * 60_000;
 let creditsCache: { at: number; data: ApiCreditsSnapshot } | null = null;
@@ -122,45 +116,30 @@ export function OverviewPanel({
   maskedAccountIds = NO_IDS,
 }: OverviewPanelProps) {
   const desktop = isTauriRuntime();
-  const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
-  const [registry, setRegistry] = useState<ClaudeSeatRegistry | null>(null);
-  const [registryError, setRegistryError] = useState(false);
-  // undefined until the first answer; null when the Prometheus call itself failed.
-  const [prom, setProm] = useState<ClaudePromSnapshot | null | undefined>(undefined);
-  const [claudeLoading, setClaudeLoading] = useState(true);
+  const {
+    summary,
+    registry,
+    registryError,
+    prom,
+    plans,
+    loading: claudeLoading,
+    loadedAt: claudeLoadedAt,
+    reload: loadLocal,
+  } = useClaudeSources();
   const [credits, setCredits] = useState<ApiCreditsSnapshot | null>(creditsCache?.data ?? null);
   const [creditsError, setCreditsError] = useState("");
   const [creditsLoading, setCreditsLoading] = useState(false);
   const [client, setClient] = useState<ClientStatusSnapshot | null>(clientCache?.data ?? null);
   const [clientError, setClientError] = useState("");
   const [clientLoading, setClientLoading] = useState(false);
-  const [plans, setPlans] = useState<PlanDates[]>([]);
   const [now, setNow] = useState(() => Date.now());
-  const latestClaude = useRef(0);
   const latestCredits = useRef(0);
   const latestClient = useRef(0);
 
-  // Claude seats and the saved plan dates. Each source is optional on its own, as on the Claude tab: a failed
-  // one leaves the rest in place.
-  const loadLocal = useCallback(async () => {
-    const run = ++latestClaude.current;
-    setClaudeLoading(true);
-    const [usage, seatResult, snapshot, access] = await Promise.all([
-      invokeBackend<ClaudeUsageSummary>("get_claude_usage").catch(() => null),
-      invokeBackend<ClaudeSeatRegistry>("get_claude_seats").then((value) => ({ value, error: false })).catch(() => ({ value: null, error: true })),
-      invokeBackend<ClaudePromSnapshot>("get_claude_prometheus").catch(() => null),
-      invokeBackend<{ plans: PlanDates[] }>("get_provider_access").catch(() => null),
-    ]);
-    if (run !== latestClaude.current) return;
-    if (usage) setSummary(usage);
-    // A failed read returns null; keep the prior registry (including hidden IDs) so seats stay hidden.
-    setRegistryError(seatResult.error);
-    if (seatResult.value) setRegistry(seatResult.value);
-    setProm(snapshot);
-    if (access) setPlans(access.plans);
-    setClaudeLoading(false);
-    setNow(Date.now());
-  }, []);
+  // A finished Claude load moves the clock too, so a countdown never lags the data it explains.
+  useEffect(() => {
+    if (claudeLoadedAt) setNow(Date.now());
+  }, [claudeLoadedAt]);
 
   const loadCredits = useCallback(async (force: boolean) => {
     if (!isTauriRuntime()) return;
@@ -178,18 +157,6 @@ export function OverviewPanel({
       if (run === latestCredits.current) setCreditsLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    void loadLocal();
-    const id = window.setInterval(() => void loadLocal(), REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [loadLocal]);
-
-  useEffect(() => {
-    const refresh = () => void loadLocal();
-    window.addEventListener("claude-seats-changed", refresh);
-    return () => window.removeEventListener("claude-seats-changed", refresh);
-  }, [loadLocal]);
 
   useEffect(() => {
     const tick = () => setNow(Date.now());

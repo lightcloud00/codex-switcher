@@ -374,34 +374,57 @@ export type StripEventKind = "back" | "reset" | "ends";
 export interface StripEvent {
   kind: StripEventKind;
   at: number;
-  /** "3:30 PM" in the display zone. */
+  /** "3:30 PM" in the display zone; "" for a date-only event. */
   time: string;
   /** For a reset, the window that resets: "weekly", "30d". */
   window?: string;
 }
 
-/** What happens to an account on each strip day: when it comes back, its long window's reset, and its plan end. */
-export function stripEvents(entry: UseNextEntry, days: StripDay[], format: WhenFormat = {}): Map<string, StripEvent[]> {
+export interface StripItem {
+  kind: StripEventKind;
+  /** ms since epoch; null leaves the item out. */
+  at: number | null;
+  window?: string;
+  /** A date-only item ("2026-11-14"): placed on that day as written, with no time of day. */
+  day?: string;
+}
+
+/** Items that fall on the strip's days, by day; one event per moment, the first item given wins. */
+export function eventsOnDays(items: StripItem[], days: StripDay[], format: WhenFormat = {}): Map<string, StripEvent[]> {
   const keys = new Set(days.map((day) => day.key));
   const events = new Map<string, StripEvent[]>();
-  const add = (kind: StripEventKind, at: number | null, window?: string) => {
-    if (at === null) return;
-    const key = dayKey(at, format);
-    if (!keys.has(key)) return;
+  for (const { kind, at, window, day } of items) {
+    if (at === null) continue;
+    const key = day ?? dayKey(at, format);
+    if (!keys.has(key)) continue;
     const list = events.get(key) ?? [];
-    if (list.some((event) => event.at === at)) return;
-    const time = dropZeroMinutes(
-      new Intl.DateTimeFormat(format.locale, { hour: "numeric", minute: "2-digit", timeZone: format.timeZone }).format(
-        new Date(at)
-      )
-    );
+    if (list.some((event) => event.at === at)) continue;
+    const time =
+      day !== undefined
+        ? ""
+        : dropZeroMinutes(
+            new Intl.DateTimeFormat(format.locale, { hour: "numeric", minute: "2-digit", timeZone: format.timeZone }).format(
+              new Date(at)
+            )
+          );
     list.push(window === undefined ? { kind, at, time } : { kind, at, time, window });
     events.set(key, list);
-  };
-  const { row, account } = entry;
-  if (row.status === "exhausted") add("back", toMs(row.back_at));
-  const long = usageWindows(account.usage).long;
-  if (row.status !== "expired" && long) add("reset", long.resetsAt, windowLabel(long.minutes));
-  add("ends", toMs(row.subscription_expires_at));
+  }
   return events;
+}
+
+/** What happens to an account on each strip day: when it comes back, its long window's reset, and its plan end. */
+export function stripEvents(entry: UseNextEntry, days: StripDay[], format: WhenFormat = {}): Map<string, StripEvent[]> {
+  const { row, account } = entry;
+  const items: StripItem[] = [];
+  if (row.status === "exhausted") items.push({ kind: "back", at: toMs(row.back_at) });
+  const long = usageWindows(account.usage).long;
+  if (row.status !== "expired" && long) items.push({ kind: "reset", at: long.resetsAt, window: windowLabel(long.minutes) });
+  items.push({ kind: "ends", at: toMs(row.subscription_expires_at) });
+  return eventsOnDays(items, days, format);
+}
+
+/** The plan line under a Codex row ("Pro · ends Nov 23"); none for an ended plan, whose row already says so. */
+export function planLine(row: UseNextRow, now: number, format: WhenFormat = {}): string | null {
+  return row.status === "expired" ? null : planText(row, now, format);
 }

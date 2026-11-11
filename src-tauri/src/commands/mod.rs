@@ -26,6 +26,9 @@ pub use window::*;
 pub mod provider_access;
 pub use provider_access::*;
 
+pub mod claude_seat_subscriptions;
+pub use claude_seat_subscriptions::*;
+
 pub mod api_credits;
 pub use api_credits::*;
 pub mod client_status;
