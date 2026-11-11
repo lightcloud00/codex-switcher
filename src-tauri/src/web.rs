@@ -84,7 +84,7 @@ struct FileImportArgs {
 }
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
-    let address = format!("{host}:{port}");
+    let address = crate::web_access::local_bind_address(host, port)?;
     let server = Server::http(&address)
         .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
     let runtime = Runtime::new().context("Failed to start async runtime")?;
@@ -105,11 +105,23 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
 }
 
 fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> anyhow::Result<()> {
+    if let Err(rejection) = crate::web_access::validate_local_request(&request) {
+        respond_json(
+            request,
+            StatusCode(rejection.status),
+            &json!({ "error": rejection.message }),
+        )?;
+        return Ok(());
+    }
     let method = request.method().clone();
     let url = request.url().to_string();
 
     if method == Method::Get && url == "/api/health" {
-        respond_json(request, StatusCode(200), &json!({ "ok": true }))?;
+        respond_json(
+            request,
+            StatusCode(200),
+            &json!({ "ok": true, "build": crate::build_info::current_build_info() }),
+        )?;
         return Ok(());
     }
 
@@ -119,28 +131,21 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
             command,
             "export_accounts_full_encrypted_bytes" | "import_accounts_full_encrypted_bytes"
         );
-        let payload = if is_backup {
-            if !is_local_backup_request(&request) {
+        let limit = if is_backup {
+            crate::web_access::MAX_BACKUP_BYTES
+        } else {
+            crate::web_access::MAX_COMMAND_BYTES
+        };
+        let payload = match crate::web_access::parse_command_json(&mut request, limit) {
+            Ok(payload) => payload,
+            Err(rejection) => {
                 respond_json(
                     request,
-                    StatusCode(403),
-                    &json!({ "error": "Backups are available in the desktop app or from a local browser." }),
+                    StatusCode(rejection.status),
+                    &json!({ "error": rejection.message }),
                 )?;
                 return Ok(());
             }
-            match parse_backup_request_json(&mut request) {
-                Ok(payload) => payload,
-                Err(_) => {
-                    respond_json(
-                        request,
-                        StatusCode(400),
-                        &json!({ "error": "Invalid backup request." }),
-                    )?;
-                    return Ok(());
-                }
-            }
-        } else {
-            parse_request_json(&mut request)?
         };
         let result = runtime.block_on(invoke_web_command(command, payload));
         match result {
@@ -166,6 +171,7 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
 
 async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, String> {
     match command {
+        "get_build_info" => to_json(crate::build_info::current_build_info()),
         "list_accounts" => to_json(list_accounts().await?),
         "get_active_account_info" => to_json(get_active_account_info().await?),
         "add_account_from_file" => {
@@ -283,120 +289,6 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
     }
 }
 
-fn is_local_backup_request(request: &Request) -> bool {
-    request
-        .remote_addr()
-        .is_some_and(|addr| addr.ip().to_canonical().is_loopback())
-        && request
-            .headers()
-            .iter()
-            .any(|header| header.field.equiv("Host") && is_loopback_host(header.value.as_str()))
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let host = match host.rsplit_once(':') {
-        Some((name, port)) if port.parse::<u16>().is_ok() => name,
-        _ => host,
-    };
-    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "[::1]")
-}
-
-fn parse_backup_request_json(request: &mut Request) -> anyhow::Result<Value> {
-    use std::io::Read;
-
-    // Requiring JSON prevents cross-origin form posts to this local endpoint.
-    if !request.headers().iter().any(|header| {
-        header.field.equiv("Content-Type")
-            && header
-                .value
-                .as_str()
-                .split(';')
-                .next()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-    }) {
-        anyhow::bail!("Backup request must be JSON");
-    }
-
-    // The backup parser limits decoded files to 8 MiB. Allow base64 overhead.
-    const MAX_REQUEST_BYTES: u64 = 12 * 1024 * 1024;
-    let mut body = Vec::new();
-    request
-        .as_reader()
-        .take(MAX_REQUEST_BYTES + 1)
-        .read_to_end(&mut body)?;
-    if body.len() as u64 > MAX_REQUEST_BYTES {
-        anyhow::bail!("Backup request is too large");
-    }
-    Ok(serde_json::from_slice(&body)?)
-}
-
-#[cfg(test)]
-mod backup_web_tests {
-    use super::*;
-    use tiny_http::TestRequest;
-
-    fn backup_request(remote: &str, host: &str, content_type: &str) -> Request {
-        TestRequest::new()
-            .with_method(Method::Post)
-            .with_remote_addr(remote.parse().unwrap())
-            .with_header(format!("Host: {host}").parse().unwrap())
-            .with_header(format!("Content-Type: {content_type}").parse().unwrap())
-            .with_body(r#"{"password":"synthetic backup password"}"#)
-            .into()
-    }
-
-    #[test]
-    fn backup_web_requires_both_local_peer_and_local_host() {
-        assert!(is_local_backup_request(&backup_request(
-            "127.0.0.1:1234",
-            "localhost:3210",
-            "application/json"
-        )));
-        assert!(is_local_backup_request(&backup_request(
-            "[::1]:1234",
-            "[::1]:3210",
-            "application/json"
-        )));
-        assert!(!is_local_backup_request(&backup_request(
-            "192.0.2.1:1234",
-            "localhost:3210",
-            "application/json"
-        )));
-        assert!(!is_local_backup_request(&backup_request(
-            "127.0.0.1:1234",
-            "backup.example:3210",
-            "application/json"
-        )));
-    }
-
-    #[test]
-    fn backup_web_does_not_accept_cross_origin_form_content_types() {
-        let mut form_request = backup_request("127.0.0.1:1234", "localhost:3210", "text/plain");
-        assert!(parse_backup_request_json(&mut form_request).is_err());
-
-        let mut json_request = backup_request(
-            "127.0.0.1:1234",
-            "localhost:3210",
-            "application/json; charset=utf-8",
-        );
-        assert!(parse_backup_request_json(&mut json_request).is_ok());
-    }
-}
-
-fn parse_request_json(request: &mut Request) -> anyhow::Result<Value> {
-    let mut body = String::new();
-    request
-        .as_reader()
-        .read_to_string(&mut body)
-        .context("Failed to read request body")?;
-
-    if body.trim().is_empty() {
-        return Ok(json!({}));
-    }
-
-    serde_json::from_str(&body).context("Failed to parse request JSON")
-}
-
 fn parse_args<T>(value: Value) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -456,7 +348,10 @@ fn serve_file(request: Request, path: PathBuf) -> anyhow::Result<()> {
     let mime = mime_type_for_path(&path);
     let response = Response::from_data(data)
         .with_header(header("Content-Type", mime)?)
-        .with_header(header("Cache-Control", "no-cache")?);
+        .with_header(header("Cache-Control", "no-cache")?)
+        .with_header(header("X-Content-Type-Options", "nosniff")?)
+        .with_header(header("X-Frame-Options", "DENY")?)
+        .with_header(header("Content-Security-Policy", "frame-ancestors 'none'")?);
     request.respond(response)?;
     Ok(())
 }
@@ -464,7 +359,9 @@ fn serve_file(request: Request, path: PathBuf) -> anyhow::Result<()> {
 fn respond_json(request: Request, status: StatusCode, payload: &Value) -> anyhow::Result<()> {
     let response = Response::from_string(serde_json::to_string(payload)?)
         .with_status_code(status)
-        .with_header(header("Content-Type", "application/json; charset=utf-8")?);
+        .with_header(header("Content-Type", "application/json; charset=utf-8")?)
+        .with_header(header("Cache-Control", "no-store")?)
+        .with_header(header("X-Content-Type-Options", "nosniff")?);
     request.respond(response)?;
     Ok(())
 }

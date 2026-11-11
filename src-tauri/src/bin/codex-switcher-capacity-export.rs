@@ -16,6 +16,23 @@ fn flag(name: &str) -> bool {
 
 #[tokio::main]
 async fn main() {
+    // These modes identify the binary before any export arguments, account
+    // stores, admission receipts or network-backed usage are consulted.
+    if flag("--build-info") {
+        println!(
+            "{}",
+            serde_json::to_string(&codex_switcher_lib::build_info::current_build_info())
+                .expect("build metadata is serializable")
+        );
+        return;
+    }
+    if flag("--version") {
+        println!(
+            "codex-switcher-capacity-export {}",
+            codex_switcher_lib::build_info::current_build_info().display_version()
+        );
+        return;
+    }
     let output = argument("--output").unwrap_or_else(|| {
         eprintln!("--output is required");
         std::process::exit(2);

@@ -10,6 +10,7 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::auth::{ensure_chatgpt_tokens_fresh, refresh_chatgpt_tokens};
 use crate::types::{
@@ -31,6 +32,9 @@ const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
      Chrome/136.0.0.0 Safari/537.36";
 const SESSION_WINDOW_SECONDS: i32 = 5 * 60 * 60;
 const WEEKLY_WINDOW_SECONDS: i32 = 7 * 24 * 60 * 60;
+const WARMUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const WARMUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_WARMUP_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ChatGptAccountMetadata {
@@ -212,21 +216,13 @@ async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
         response = send_chatgpt_warmup_request(retry_token, retry_account_id, true).await?;
     }
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        println!("[Warmup] ChatGPT warm-up error response: {body}");
-        anyhow::bail!("ChatGPT warm-up failed with status {status}");
-    }
-
-    let body = response.text().await.unwrap_or_default();
-    log_warmup_response("ChatGPT", &body, true);
-
-    Ok(())
+    finish_warmup_response("ChatGPT", response, true).await
 }
 
 async fn warmup_with_api_key(api_key: &str) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = warmup_client_builder(WARMUP_REQUEST_TIMEOUT)
+        .build()
+        .context("Failed to create warm-up client")?;
     let payload = build_warmup_payload(false, true);
     let response = client
         .post(format!("{OPENAI_API}/responses"))
@@ -237,17 +233,7 @@ async fn warmup_with_api_key(api_key: &str) -> Result<()> {
         .await
         .context("Failed to send API key warm-up request")?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        println!("[Warmup] API key warm-up error response: {body}");
-        anyhow::bail!("API key warm-up failed with status {status}");
-    }
-
-    let body = response.text().await.unwrap_or_default();
-    log_warmup_response("API key", &body, false);
-
-    Ok(())
+    finish_warmup_response("API key", response, false).await
 }
 
 fn build_warmup_payload(stream: bool, include_max_output_tokens: bool) -> serde_json::Value {
@@ -380,7 +366,9 @@ async fn send_chatgpt_warmup_request(
     chatgpt_account_id: Option<&str>,
     stream: bool,
 ) -> Result<reqwest::Response> {
-    let client = reqwest::Client::new();
+    let client = warmup_client_builder(WARMUP_REQUEST_TIMEOUT)
+        .build()
+        .context("Failed to create warm-up client")?;
     let headers = build_chatgpt_headers(access_token, chatgpt_account_id)?;
     let payload = build_warmup_payload(stream, false);
 
@@ -391,6 +379,56 @@ async fn send_chatgpt_warmup_request(
         .send()
         .await
         .context("Failed to send ChatGPT warm-up request")
+}
+
+// A request deadline also covers consuming the body, including a stalled SSE
+// response. It does not cancel or retry an OAuth token rotation.
+fn warmup_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(WARMUP_CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout)
+}
+
+async fn read_warmup_body(mut response: reqwest::Response) -> Result<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_WARMUP_RESPONSE_BYTES as u64)
+    {
+        anyhow::bail!("Warm-up response exceeded the 1 MiB limit");
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read warm-up response body")?
+    {
+        if chunk.len() > MAX_WARMUP_RESPONSE_BYTES.saturating_sub(body.len()) {
+            anyhow::bail!("Warm-up response exceeded the 1 MiB limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).context("Warm-up response was not valid UTF-8")
+}
+
+async fn finish_warmup_response(
+    source: &str,
+    response: reqwest::Response,
+    is_sse: bool,
+) -> Result<()> {
+    let status = response.status();
+    let body = read_warmup_body(response)
+        .await
+        .with_context(|| format!("Could not read {source} warm-up response"))?;
+    if !status.is_success() {
+        println!(
+            "[Warmup] {source} warm-up error response: {}",
+            truncate_text(&body, 300)
+        );
+        anyhow::bail!("{source} warm-up failed with status {status}");
+    }
+    log_warmup_response(source, &body, is_sse);
+    Ok(())
 }
 
 fn log_warmup_response(source: &str, body: &str, is_sse: bool) {
@@ -418,7 +456,11 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         return text.to_string();
     }
-    let mut out = text[..max_len].to_string();
+    let mut end = max_len;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = text[..end].to_string();
     out.push_str("...");
     out
 }
@@ -618,5 +660,158 @@ mod tests {
 
         assert_eq!(primary.map(|window| window.used_percent), Some(11.0));
         assert_eq!(secondary.map(|window| window.used_percent), Some(22.0));
+    }
+    #[test]
+    fn warmup_previews_truncate_at_utf8_boundaries() {
+        assert_eq!(truncate_text("", 0), "");
+        assert_eq!(truncate_text("hello", 5), "hello");
+        assert_eq!(truncate_text("hello", 3), "hel...");
+        assert_eq!(truncate_text("é🙂", 1), "...");
+        assert_eq!(truncate_text("é🙂", 3), "é...");
+        for limit in [200, 300] {
+            let prefix = "x".repeat(limit - 1);
+            let text = format!("{prefix}🙂終");
+            assert_eq!(truncate_text(&text, limit), format!("{prefix}..."));
+        }
+    }
+
+    async fn warmup_fixture(
+        response: Vec<u8>,
+        hold_open: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 1024];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let length = socket.read(&mut buf).await.unwrap();
+                if length == 0 || request.len() + length > 8192 {
+                    return;
+                }
+                request.extend_from_slice(&buf[..length]);
+            }
+            if socket.write_all(&response).await.is_err() {
+                return;
+            }
+            if hold_open {
+                std::future::pending::<()>().await;
+            }
+        });
+        (format!("http://{address}/warmup-fixture"), server)
+    }
+
+    #[tokio::test]
+    async fn warmup_accepts_a_complete_small_body() {
+        let (url, server) = warmup_fixture(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),
+            false,
+        )
+        .await;
+        let response = warmup_client_builder(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let result = finish_warmup_response("fixture", response, false).await;
+        server.abort();
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn warmup_body_deadline_rejects_a_stalled_success_response() {
+        let (url, server) = warmup_fixture(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nok".to_vec(),
+            true,
+        )
+        .await;
+        let response = warmup_client_builder(Duration::from_millis(500))
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result = finish_warmup_response("fixture", response, false).await;
+        server.abort();
+        let error = result.expect_err("an unfinished body must not count as a successful warm-up");
+        assert!(error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn warmup_rejects_a_truncated_success_body() {
+        let (url, server) = warmup_fixture(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort".to_vec(),
+            false,
+        )
+        .await;
+        let response = warmup_client_builder(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let result = finish_warmup_response("fixture", response, false).await;
+        server.abort();
+        assert!(
+            result.is_err(),
+            "a body read error must not become an empty successful response"
+        );
+    }
+
+    #[tokio::test]
+    async fn warmup_rejects_an_oversized_declared_body_before_waiting_for_it() {
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_WARMUP_RESPONSE_BYTES + 1
+        );
+        let (url, server) = warmup_fixture(raw.into_bytes(), true).await;
+        let response = warmup_client_builder(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let result = finish_warmup_response("fixture", response, false).await;
+        server.abort();
+        assert!(format!("{:#}", result.unwrap_err()).contains("1 MiB"));
+    }
+
+    #[tokio::test]
+    async fn warmup_limits_chunked_bodies_without_a_content_length() {
+        let size = MAX_WARMUP_RESPONSE_BYTES + 1;
+        let mut raw = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{size:x}\r\n"
+        )
+        .into_bytes();
+        raw.extend(vec![b'x'; size]);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (url, server) = warmup_fixture(raw, false).await;
+        let response = warmup_client_builder(Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let result = finish_warmup_response("fixture", response, false).await;
+        server.abort();
+        assert!(format!("{:#}", result.unwrap_err()).contains("1 MiB"));
     }
 }

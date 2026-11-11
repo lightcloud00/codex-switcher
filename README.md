@@ -37,79 +37,90 @@
 
 ## Installation
 
-### Download a Release
+### Fleet build
 
-The easiest way to install Codex Switcher is from the latest GitHub release:
+This repository is Gustavo's fleet build of Codex Switcher. Its supported source
+is [`lightcloud00/codex-switcher`, branch `base/upstream-0.2.20`](https://github.com/lightcloud00/codex-switcher/tree/base/upstream-0.2.20).
+Use that explicit branch: the repository's older default branch is not the fleet
+deployment source.
 
-[Download the latest release](https://github.com/Lampese/codex-switcher/releases/latest)
+Fleet updates use reviewed packages or a build from that source. The upstream
+automatic updater is deliberately disabled, so there is no in-app update prompt
+or automatic replacement from Lampese releases.
 
-Choose the file for your platform:
+### Identify an installed build
 
-- **macOS Apple Silicon:** `Codex.Switcher_*_aarch64.dmg`
-- **macOS Intel:** `Codex.Switcher_*_x64.dmg`
-- **Windows:** `Codex.Switcher_*_x64-setup.exe` or `Codex.Switcher_*_x64_en-US.msi`
-- **Linux Debian/Ubuntu:** `Codex.Switcher_*_amd64.deb`
-- **Linux AppImage:** `Codex.Switcher_*_amd64.AppImage`
-- **Linux RPM:** `Codex.Switcher-*-1.x86_64.rpm`
+Open **Settings → Build details** and use **Copy** to record the package version,
+commit, source tree, source-change status and platform. On macOS the About dialog
+also shows the short commit and whether the source was modified.
 
-> **macOS:** current release builds are not Apple-notarized. If macOS says the
-> app is damaged, move it to `/Applications` and remove the quarantine flag:
->
-> ```bash
-> sudo xattr -dr com.apple.quarantine "/Applications/Codex Switcher.app"
-> open "/Applications/Codex Switcher.app"
-> ```
-
-### Auto Updates
-
-Codex Switcher checks the latest GitHub release on startup. When a newer signed
-update package is available, the app shows an update prompt and can install it
-from inside the app.
-
-### Build from Source
-
-#### Prerequisites
-
-- [Node.js](https://nodejs.org/) (v18+)
-- [pnpm](https://pnpm.io/)
-- [Rust](https://rustup.rs/)
+The capacity exporter reports the same metadata without exporting accounts:
 
 ```bash
-# Clone the repository
-git clone https://github.com/Lampese/codex-switcher.git
-cd codex-switcher
-
-# Install dependencies
-pnpm install
-
-# Run in development mode
-pnpm tauri dev
-
-# Build for production
-pnpm tauri build
+codex-switcher-capacity-export --build-info
+codex-switcher-capacity-export --version
 ```
 
-> **Windows:** the `pnpm tauri` script runs through a POSIX shell wrapper
-> (`sh ./scripts/tauri.sh`) and will not work in PowerShell/CMD. Use the
-> `tauri:win` script instead: `pnpm tauri:win dev` and `pnpm tauri:win build`.
+Several fleet builds can share a package version such as `0.2.20`. Compare the
+source tree and commit with the reviewed revision, and record the package checksum
+and installed executable identity for each machine. A merge commit and its tested
+head may have different commit IDs but the same source tree. Modified sources must
+not be treated as an exact build of the committed tree.
 
-The built application will be in `src-tauri/target/release/bundle/`.
+Missing Git metadata is shown as unknown. The record describes the binary when it
+was built; it contains no account data, source-directory paths or build timestamps.
+It is an identification aid, not a signature or a check for newer releases.
 
-### Run the Dashboard in a Browser
+### Build from source
 
-You can also serve the built dashboard over HTTP instead of opening the Tauri shell.
+Prerequisites: Node.js 24 (used by fleet desktop validation), pnpm, Rust and the
+platform dependencies required by Tauri.
 
 ```bash
-# Build the frontend and start the web server on 0.0.0.0:3210
+git clone --branch base/upstream-0.2.20 https://github.com/lightcloud00/codex-switcher.git
+cd codex-switcher
+git rev-parse HEAD
+git rev-parse 'HEAD^{tree}'
+
+pnpm install --frozen-lockfile
+pnpm test
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+pnpm tauri build
+
+# Build the companion exporter from the same source.
+cargo build --release --locked --manifest-path src-tauri/Cargo.toml --bin codex-switcher-capacity-export
+```
+
+On Windows use `pnpm tauri:win build`; `pnpm tauri` uses a POSIX shell wrapper.
+For development use `pnpm tauri dev` or `pnpm tauri:win dev`.
+
+Application packages are written under `src-tauri/target/release/bundle/` and the
+exporter under `src-tauri/target/release/`. Verify the artifact and its source
+identity before replacing an installed fleet build. Keep its rollback package
+and installation receipt with the deployment record.
+
+### Run the dashboard in a local browser
+
+The existing `lan` script builds the frontend and starts a loopback-only server:
+
+```bash
 pnpm lan
 ```
 
-Optional environment variables:
+Open `http://127.0.0.1:3210`. `CODEX_SWITCHER_WEB_PORT` changes the port;
+`CODEX_SWITCHER_WEB_HOST` accepts only loopback hosts. Non-loopback binds are
+rejected. Browser commands require a local peer and Host, same-origin requests
+when an Origin is supplied, and bounded JSON bodies.
 
-- `CODEX_SWITCHER_WEB_HOST` to override the bind host
-- `CODEX_SWITCHER_WEB_PORT` to override the port
+For another computer, use an authenticated local tunnel to the loopback listener,
+then open its local forwarded URL. For example, with your existing SSH access:
 
-The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
+```bash
+ssh -N -L 3210:127.0.0.1:3210 user@host
+```
+
+Keep the tunnel endpoint local. The server does not provide a public or direct LAN
+authentication service.
 
 ## Usage and Reset Credits
 
@@ -243,7 +254,7 @@ pnpm version:major
 pnpm release patch
 
 # Prepare and push a release
-# The tag stores the release note for the in-app update prompt.
+# The tag stores the release note for the release page.
 pnpm release patch -- --push
 
 # For non-interactive use, pass the note explicitly.
@@ -286,7 +297,7 @@ of at least 12 characters. New files use a salted PBKDF2-HMAC-SHA256 key and aut
 XChaCha20-Poly1305 encryption. Keep the password separately: Switcher does not retain it.
 **Restore Backup** imports missing accounts and preserves existing ones. Older files
 require the explicit **Legacy backup (created without a password)** choice. Raw token
-text export is no longer offered in the UI or LAN API. Backup operations are available
+text export is no longer offered in the UI or local browser API. Backup operations are available
 in the desktop app and local loopback browser only.
 
 Account and settings saves use private temporary files and atomic replacement. Account

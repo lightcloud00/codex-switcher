@@ -4,12 +4,14 @@ pub mod api;
 #[cfg(desktop)]
 pub mod app_menu;
 pub mod auth;
+pub mod build_info;
 pub mod capacity_export;
 pub mod commands;
 #[cfg(desktop)]
 pub mod tray;
 pub mod types;
 pub mod web;
+mod web_access;
 
 use commands::{
     ack_close_behavior_prompt, add_account_from_file, cancel_codex_session_recovery, cancel_login,
@@ -68,6 +70,7 @@ pub fn run() {
             commands::open_codex_app,
             commands::get_codex_reopen_info,
             commands::reopen_closed_codex_desktop,
+            build_info::get_build_info,
             // Account management
             list_accounts,
             get_active_account_info,

@@ -3,6 +3,7 @@ import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import type { DockDisplayMode } from "../types";
+import { BuildInfoPanel } from "./BuildInfoPanel";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "use_next_text" | "hidden";
 interface DisplaySettings {
@@ -167,6 +168,7 @@ export function SettingsModal({
           <p className="text-sm text-gray-500 dark:text-gray-400">
             With desktop reopening enabled, continue recent quota-stopped conversations after switching. On macOS, also continue running chats interrupted by the restart. Finished chats and chats waiting for input are left alone. Switcher checks that each continuation starts.
           </p>
+          <BuildInfoPanel />
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">
           <button onClick={onClose} disabled={saving} className="px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 disabled:opacity-50">Done</button>

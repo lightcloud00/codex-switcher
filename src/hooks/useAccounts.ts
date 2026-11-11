@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type {
   AccountInfo,
   UsageInfo,
@@ -6,6 +6,7 @@ import type {
   WarmupSummary,
 } from "../types";
 import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
+import { createUsageRefresher } from "../lib/usageRefresh";
 
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
@@ -13,6 +14,7 @@ export function useAccounts() {
   const [error, setError] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
   const metadataRefreshInFlightRef = useRef(new Set<string>());
+  const accountLoadGenerationRef = useRef(0);
   const maxConcurrentUsageRequests = 10;
 
   useEffect(() => {
@@ -37,11 +39,42 @@ export function useAccounts() {
     []
   );
 
-  // Push freshly polled usage down to the tray (single poller feeds the tray menu).
+  // Native get_usage ingests successful reads; report failures synthesized here.
   const reportUsageToTray = useCallback((usages: UsageInfo[]) => {
     if (!isTauriRuntime() || usages.length === 0) return;
     void invokeBackend("report_usage", { usages }).catch(() => {});
   }, []);
+
+  const usageRefresher = useMemo(
+    () => createUsageRefresher<UsageInfo>(
+      (accountId) => invokeBackend<UsageInfo>("get_usage", { accountId }),
+      {
+        onStart: (accountId) => {
+          setAccounts((prev) => prev.map((account) =>
+            account.id === accountId ? { ...account, usageLoading: true } : account
+          ));
+        },
+        onResult: (result) => {
+          const account = accountsRef.current.find((item) => item.id === result.accountId);
+          const usage = result.ok
+            ? result.value
+            : buildUsageError(
+                result.accountId,
+                result.error instanceof Error ? result.error.message : String(result.error),
+                account?.plan_type ?? null,
+              );
+          if (!result.ok) console.error("Failed to refresh usage:", result.error);
+          setAccounts((prev) => prev.map((item) =>
+            item.id === result.accountId
+              ? { ...item, usage, usageLoading: false, usageCheckedAt: result.checkedAt }
+              : item
+          ));
+          if (!result.ok) reportUsageToTray([usage]);
+        },
+      },
+    ),
+    [buildUsageError, reportUsageToTray],
+  );
 
   const runWithConcurrency = useCallback(
     async <T,>(
@@ -65,10 +98,17 @@ export function useAccounts() {
   );
 
   const loadAccounts = useCallback(async (preserveUsage = false) => {
+    const run = ++accountLoadGenerationRef.current;
+    if (!preserveUsage) {
+      usageRefresher.setAccountIds([]);
+      setAccounts((prev) => prev.map((account) => ({ ...account, usageLoading: false })));
+    }
     try {
       setLoading(true);
       setError(null);
       const accountList = await invokeBackend<AccountInfo[]>("list_accounts");
+      if (run !== accountLoadGenerationRef.current) return accountList;
+      usageRefresher.setAccountIds(accountList.map((account) => account.id));
       
       if (preserveUsage) {
         // Preserve existing usage data when just updating account info
@@ -91,12 +131,15 @@ export function useAccounts() {
       }
       return accountList;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (run === accountLoadGenerationRef.current) {
+        usageRefresher.setAccountIds(accountsRef.current.map((account) => account.id));
+        setError(err instanceof Error ? err.message : String(err));
+      }
       return [];
     } finally {
-      setLoading(false);
+      if (run === accountLoadGenerationRef.current) setLoading(false);
     }
-  }, []);
+  }, [usageRefresher]);
 
   const refreshMetadata = useCallback(
     async (
@@ -148,122 +191,46 @@ export function useAccounts() {
       accountList?: AccountInfo[] | AccountWithUsage[],
       options?: { refreshMetadata?: boolean }
     ) => {
-      try {
-        const list = accountList ?? accountsRef.current;
-        if (list.length === 0) {
-          return;
-        }
+      const list = accountList ?? accountsRef.current;
+      if (list.length === 0) return;
 
-        // Explicit refreshes include metadata, but run it beside usage so a
-        // slow accounts endpoint never delays healthy rate-limit updates.
-        const metadataPromise = options?.refreshMetadata
-          ? refreshMetadata(list)
-          : Promise.resolve();
+      // Metadata is independent of usage; each account's usage is published as
+      // soon as it settles, even when another account or metadata is slow.
+      const metadataPromise = options?.refreshMetadata
+        ? refreshMetadata(list)
+        : Promise.resolve();
+      const accountIds = Array.from(new Set(list.map((account) => account.id)));
 
-        const accountIds = list.map((account) => account.id);
-        const accountIdSet = new Set(accountIds);
-        const usageResults = new Map<string, UsageInfo>();
-
-        setAccounts((prev) =>
-          prev.map((account) =>
-            accountIdSet.has(account.id)
-              ? { ...account, usageLoading: true }
-              : account
-          )
-        );
-
-        await runWithConcurrency(
-          list,
-          async (account) => {
-            try {
-              const usage = await invokeBackend<UsageInfo>("get_usage", {
-                accountId: account.id,
-              });
-              usageResults.set(account.id, usage);
-            } catch (err) {
-              console.error("Failed to refresh usage:", err);
-              const message = err instanceof Error ? err.message : String(err);
-              usageResults.set(
-                account.id,
-                buildUsageError(account.id, message, account.plan_type ?? null)
-              );
-            }
-          },
-          maxConcurrentUsageRequests
-        );
-
-        const checkedAt = Date.now();
-        setAccounts((prev) =>
-          prev.map((account) => {
-            const usage = usageResults.get(account.id);
-            if (!usage) return account;
-            return {
-              ...account,
-              usage,
-              usageLoading: false,
-              usageCheckedAt: checkedAt,
-            };
-          })
-        );
-
-        reportUsageToTray(Array.from(usageResults.values()));
-        await metadataPromise;
-      } catch (err) {
-        console.error("Failed to refresh usage:", err);
-        throw err;
-      }
+      await runWithConcurrency(
+        accountIds,
+        async (accountId) => {
+          try {
+            await usageRefresher.refresh(accountId);
+          } catch {
+            // The shared reader publishes errors once. A removed account or
+            // superseded login intentionally publishes nothing.
+          }
+        },
+        maxConcurrentUsageRequests,
+      );
+      await metadataPromise;
     },
-    [
-      buildUsageError,
-      maxConcurrentUsageRequests,
-      refreshMetadata,
-      reportUsageToTray,
-      runWithConcurrency,
-    ]
+    [maxConcurrentUsageRequests, refreshMetadata, runWithConcurrency, usageRefresher],
   );
 
   const refreshSingleUsage = useCallback(async (
     accountId: string,
     options?: { refreshMetadata?: boolean }
   ) => {
-    try {
-      const account = accountsRef.current.find((item) => item.id === accountId);
-      const metadataPromise = options?.refreshMetadata && account
-        ? refreshMetadata([account])
-        : Promise.resolve();
+    const account = accountsRef.current.find((item) => item.id === accountId);
+    const metadataPromise = options?.refreshMetadata && account
+      ? refreshMetadata([account])
+      : Promise.resolve();
 
-      setAccounts((prev) =>
-        prev.map((a) =>
-          a.id === accountId ? { ...a, usageLoading: true } : a
-        )
-      );
-      const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
-      setAccounts((prev) =>
-        prev.map((a) =>
-          a.id === accountId ? { ...a, usage, usageLoading: false, usageCheckedAt: Date.now() } : a
-        )
-      );
-      reportUsageToTray([usage]);
-      await metadataPromise;
-      return usage;
-    } catch (err) {
-      console.error("Failed to refresh single usage:", err);
-      const message = err instanceof Error ? err.message : String(err);
-      setAccounts((prev) =>
-        prev.map((a) =>
-          a.id === accountId
-            ? {
-                ...a,
-                usage: buildUsageError(accountId, message, a.plan_type ?? null),
-                usageLoading: false,
-                usageCheckedAt: Date.now(),
-              }
-            : a
-        )
-      );
-      throw err;
-    }
-  }, [buildUsageError, refreshMetadata, reportUsageToTray]);
+    const usage = await usageRefresher.refresh(accountId);
+    await metadataPromise;
+    return usage;
+  }, [refreshMetadata, usageRefresher]);
 
   const warmupAccount = useCallback(async (accountId: string) => {
     try {
@@ -398,7 +365,9 @@ export function useAccounts() {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     loadAccounts().then((accountList) => {
+      if (disposed) return;
       void refreshUsage(accountList);
       // Populate live expiry immediately. The native background process keeps
       // its cache current while a desktop webview is hidden or suspended.
@@ -417,23 +386,33 @@ export function useAccounts() {
       : undefined;
     
     return () => {
+      disposed = true;
+      ++accountLoadGenerationRef.current;
+      usageRefresher.setAccountIds([]);
       clearInterval(usageInterval);
       if (metadataInterval !== undefined) clearInterval(metadataInterval);
     };
-  }, [loadAccounts, refreshMetadata, refreshUsage]);
+  }, [loadAccounts, refreshMetadata, refreshUsage, usageRefresher]);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
 
     void (async () => {
       if (!("__TAURI_INTERNALS__" in window)) return;
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen("accounts-changed", () => {
-        void loadAccounts(true);
+      if (disposed) return;
+      const stop = await listen("accounts-changed", () => {
+        if (!disposed) void loadAccounts(true);
       });
+      if (disposed) stop();
+      else unlisten = stop;
     })();
 
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [loadAccounts]);
 
   return {

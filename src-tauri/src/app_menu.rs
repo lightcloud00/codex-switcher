@@ -212,7 +212,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     let config = app.config();
     let about_metadata = AboutMetadata {
         name: Some(pkg_info.name.clone()),
-        version: Some(pkg_info.version.to_string()),
+        version: Some(crate::build_info::current_build_info().display_version()),
         copyright: config.bundle.copyright.clone(),
         authors: config
             .bundle

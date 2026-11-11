@@ -416,7 +416,7 @@ mod tests {
 
     fn account_jwt(account_id: &str, exp: i64, signature: &str) -> String {
         let payload = URL_SAFE_NO_PAD.encode(format!(
-            r#"{{"exp":{exp},"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
+            r#"{{"exp":{exp},"sub":"subject-{account_id}","https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
         ));
         format!("header.{payload}.{signature}")
     }

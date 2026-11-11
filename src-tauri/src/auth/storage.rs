@@ -11,10 +11,10 @@ use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AppSettings, AuthData, AuthDotJson, StoredAccount,
 };
 
-/// The ChatGPT account and, when the ID token carries one, the login email
-/// that a set of tokens belongs to.
+/// The workspace and user identity that a set of ChatGPT tokens belongs to.
 struct ChatGptIdentity {
     account_id: String,
+    subject: Option<String>,
     email: Option<String>,
 }
 
@@ -25,12 +25,18 @@ impl ChatGptIdentity {
         email: Option<&String>,
     ) -> Option<Self> {
         let claims = parse_chatgpt_id_token_claims(id_token);
+        let nonempty = |value: &String| !value.trim().is_empty();
         Some(Self {
-            account_id: claims.account_id.or_else(|| account_id.cloned())?,
+            account_id: claims
+                .account_id
+                .filter(nonempty)
+                .or_else(|| account_id.filter(|value| nonempty(value)).cloned())?,
+            subject: claims.subject.filter(nonempty),
             email: claims
                 .email
-                .or_else(|| email.cloned())
-                .map(|email| email.to_lowercase()),
+                .filter(nonempty)
+                .or_else(|| email.filter(|value| nonempty(value)).cloned())
+                .map(|email| email.trim().to_lowercase()),
         })
     }
 
@@ -51,14 +57,29 @@ impl ChatGptIdentity {
         Self::from_tokens(id_token, account_id.as_ref(), account.email.as_ref())
     }
 
-    /// Members of one team workspace share an account id, so compare the
-    /// login email too whenever both sides carry one.
+    /// A workspace can have several users. Prefer the stable user subject,
+    /// then an email match; workspace-only evidence is inconclusive.
+    fn compare_user(&self, other: &Self) -> Option<bool> {
+        if self.account_id != other.account_id {
+            return Some(false);
+        }
+        match (&self.subject, &other.subject) {
+            (Some(ours), Some(theirs)) => Some(ours == theirs),
+            _ => match (&self.email, &other.email) {
+                (Some(ours), Some(theirs)) => Some(ours == theirs),
+                _ => None,
+            },
+        }
+    }
+
+    /// Credential copying needs affirmative user and workspace evidence.
     fn matches(&self, other: &Self) -> bool {
-        self.account_id == other.account_id
-            && match (&self.email, &other.email) {
-                (Some(ours), Some(theirs)) => ours == theirs,
-                _ => true,
-            }
+        self.compare_user(other) == Some(true)
+    }
+
+    /// Unknown ownership must still prevent an unsafe concurrent refresh.
+    fn may_match(&self, other: &Self) -> bool {
+        self.compare_user(other) != Some(false)
     }
 }
 
@@ -72,7 +93,7 @@ pub fn live_auth_may_hold_account(account: &StoredAccount, auth: &AuthDotJson) -
         ChatGptIdentity::of_account(account),
         ChatGptIdentity::of_live_auth(auth),
     ) {
-        (Some(stored), Some(live)) => stored.matches(&live),
+        (Some(stored), Some(live)) => stored.may_match(&live),
         _ => true,
     }
 }
@@ -206,26 +227,30 @@ fn copy_private(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// is fsynced and renamed over the target, so a crash leaves either the old or
 /// the new file intact. When `keep_backups > 0`, the previous file is first
 /// rotated into `<name>.bak.1` .. `<name>.bak.N` (all 0600).
+/// Callers still need to serialize whole read/modify/write transactions; unique
+/// temporary files do not prevent lost updates or serialize backup rotation.
 pub(crate) fn atomic_write_private(path: &Path, content: &[u8], keep_backups: usize) -> Result<()> {
+    // The PID alone is shared by simultaneous saves. Each writer must own a
+    // different file, opened exclusively so an existing path is never reused.
     let tmp = path.with_file_name(format!(
-        ".{}.tmp-{}",
+        ".{}.tmp-{}-{}",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        uuid::Uuid::new_v4()
     ));
-
-    let write_tmp = || -> std::io::Result<()> {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(content)?;
-        f.sync_all()
-    };
-    if let Err(e) = write_tmp() {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    // On creation failure we own nothing and must not remove the existing path.
+    let mut file = opts.open(&tmp).context("Failed to create temp file")?;
+    let write_result = file.write_all(content).and_then(|()| file.sync_all());
+    // Close before replacement or cleanup, including on Windows.
+    drop(file);
+    if let Err(e) = write_result {
         let _ = fs::remove_file(&tmp);
         return Err(e).context("Failed to write temp file");
     }
@@ -379,9 +404,10 @@ pub fn remove_account(account_id: &str) -> Result<()> {
         anyhow::bail!("Account not found: {account_id}");
     }
 
-    // If we removed the active account, clear it or set to first available
+    // Removing a saved entry does not change Codex's live login. Only a later
+    // confirmed live-auth match may mark another saved account as active.
     if store.active_account_id.as_deref() == Some(account_id) {
-        store.active_account_id = store.accounts.first().map(|a| a.id.clone());
+        store.active_account_id = None;
     }
 
     save_accounts(&store)?;
@@ -580,7 +606,7 @@ mod tests {
             None,
             None,
             None,
-            format!("id-{suffix}"),
+            id_token_with_account_id(account_id, suffix),
             format!("access-{suffix}"),
             format!("refresh-{suffix}"),
             Some(account_id.into()),
@@ -591,7 +617,7 @@ mod tests {
         AuthDotJson {
             openai_api_key: None,
             tokens: Some(TokenData {
-                id_token: format!("id-{suffix}"),
+                id_token: id_token_with_account_id(account_id, suffix),
                 access_token: format!("access-{suffix}"),
                 refresh_token: format!("refresh-{suffix}"),
                 account_id: Some(account_id.into()),
@@ -607,11 +633,25 @@ mod tests {
         }
     }
 
-    fn id_token_with_account_id(account_id: &str, suffix: &str) -> String {
-        let payload =
-            format!(r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#);
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+    fn id_token_with_identity(
+        account_id: &str,
+        subject: Option<&str>,
+        email: Option<&str>,
+        suffix: &str,
+    ) -> String {
+        let payload = serde_json::json!({
+            "sub": subject,
+            "email": email,
+            "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
         format!("header.{encoded}.{suffix}")
+    }
+
+    fn id_token_with_account_id(account_id: &str, suffix: &str) -> String {
+        let subject = format!("subject-{account_id}");
+        id_token_with_identity(account_id, Some(&subject), None, suffix)
     }
 
     fn id_token_with_member(account_id: &str, email: &str, suffix: &str) -> String {
@@ -624,7 +664,7 @@ mod tests {
 
     fn id_token_with_subscription(account_id: &str, active_until: &str, suffix: &str) -> String {
         let payload = format!(
-            r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}","chatgpt_plan_type":"pro","chatgpt_subscription_active_until":"{active_until}"}}}}"#
+            r#"{{"sub":"subject-{account_id}","https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}","chatgpt_plan_type":"pro","chatgpt_subscription_active_until":"{active_until}"}}}}"#
         );
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         format!("header.{encoded}.{suffix}")
@@ -948,6 +988,7 @@ mod tests {
         let account_a = account("A", "workspace-a", "a1");
         let mut unknown = auth("workspace-a", "unknown");
         unknown.tokens.as_mut().unwrap().account_id = None;
+        unknown.tokens.as_mut().unwrap().id_token = "opaque-id-token".into();
         let api_key_login = AuthDotJson {
             openai_api_key: Some("sk-test".into()),
             tokens: None,
@@ -964,6 +1005,225 @@ mod tests {
             &auth("workspace-b", "b1")
         ));
         assert!(!live_auth_may_hold_account(&account_a, &api_key_login));
+    }
+
+    fn subject_member(subject: &str, email: Option<&str>, suffix: &str) -> StoredAccount {
+        let mut member = account(subject, "workspace-team", suffix);
+        member.email = email.map(String::from);
+        if let AuthData::ChatGPT { id_token, .. } = &mut member.auth_data {
+            *id_token = id_token_with_identity("workspace-team", Some(subject), email, suffix);
+        }
+        member
+    }
+
+    fn subject_auth(subject: Option<&str>, email: Option<&str>, suffix: &str) -> AuthDotJson {
+        let mut live = auth("workspace-team", suffix);
+        live.tokens.as_mut().unwrap().id_token =
+            id_token_with_identity("workspace-team", subject, email, suffix);
+        live
+    }
+
+    #[test]
+    fn team_members_without_email_are_told_apart_by_subject() {
+        let first = subject_member("first-subject", None, "f1");
+        let second = subject_member("second-subject", None, "s1");
+        let second_id = second.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![first.clone(), second],
+            active_account_id: Some(first.id.clone()),
+            ..AccountsStore::default()
+        };
+        let live = subject_auth(Some("second-subject"), None, "s2");
+
+        assert!(!live_auth_may_hold_account(&first, &live));
+        assert!(!sync_active_account_tokens(&mut store, &live));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-f1");
+        assert!(reconcile_active_account_with_live_auth(&mut store, &live));
+        assert_eq!(store.active_account_id.as_deref(), Some(second_id.as_str()));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-f1");
+        assert_eq!(active_refresh_token(&store), "refresh-s2");
+    }
+
+    #[test]
+    fn subject_identity_takes_precedence_over_email() {
+        let first = subject_member("first-subject", Some("old@example.test"), "f1");
+        let mut store = AccountsStore {
+            accounts: vec![first.clone()],
+            active_account_id: Some(first.id.clone()),
+            ..AccountsStore::default()
+        };
+        let other_user = subject_auth(Some("second-subject"), Some("old@example.test"), "s2");
+        assert!(!live_auth_may_hold_account(&first, &other_user));
+        assert!(!sync_active_account_tokens(&mut store, &other_user));
+        assert!(!reconcile_active_account_with_live_auth(
+            &mut store,
+            &other_user
+        ));
+        assert_eq!(active_refresh_token(&store), "refresh-f1");
+
+        let changed_email = subject_auth(Some("first-subject"), Some("new@example.test"), "f2");
+        assert!(live_auth_may_hold_account(&first, &changed_email));
+        assert!(sync_active_account_tokens(&mut store, &changed_email));
+        assert_eq!(active_refresh_token(&store), "refresh-f2");
+    }
+
+    #[test]
+    fn workspace_only_or_blank_user_claims_never_authorize_token_copy() {
+        for (subject, email) in [(None, None), (Some(""), Some(" ")), (Some(" "), None)] {
+            let saved = subject_member("saved-subject", None, "s1");
+            let live = subject_auth(subject, email, "unknown");
+            let mut store = AccountsStore {
+                accounts: vec![saved.clone()],
+                active_account_id: Some(saved.id.clone()),
+                ..AccountsStore::default()
+            };
+            let before = serde_json::to_value(&store).unwrap();
+            // Uncertainty remains a reason to avoid rotating possibly live tokens.
+            assert!(live_auth_may_hold_account(&saved, &live));
+            // It is not enough evidence to copy credentials or adopt an account.
+            assert!(!sync_active_account_tokens(&mut store, &live));
+            assert!(!reconcile_active_account_with_live_auth(&mut store, &live));
+            assert_eq!(serde_json::to_value(&store).unwrap(), before);
+
+            store.active_account_id = None;
+            assert!(!reconcile_active_account_with_live_auth(&mut store, &live));
+            assert!(store.active_account_id.is_none());
+            assert_eq!(refresh_token(&store.accounts[0]), "refresh-s1");
+        }
+    }
+
+    #[test]
+    fn deleting_active_saved_account_does_not_activate_another_login() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let first = account("First", "workspace-first", "f1");
+        let second = account("Second", "workspace-second", "s1");
+        super::save_accounts(&AccountsStore {
+            accounts: vec![first.clone(), second.clone()],
+            active_account_id: Some(first.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+        crate::auth::switch_to_account(&first).unwrap();
+        let auth_path = crate::auth::get_codex_auth_file().unwrap();
+        let live_before = std::fs::read(&auth_path).unwrap();
+
+        super::remove_account(&first.id).unwrap();
+        let mut store = super::load_accounts().unwrap();
+        assert!(store.active_account_id.is_none());
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(store.accounts[0].id, second.id);
+        assert!(!reconcile_active_account_with_live_auth(
+            &mut store,
+            &auth("workspace-first", "f1")
+        ));
+        assert!(
+            !crate::types::AccountInfo::from_stored(
+                &store.accounts[0],
+                store.active_account_id.as_deref()
+            )
+            .is_active
+        );
+        assert_eq!(std::fs::read(auth_path).unwrap(), live_before);
+
+        // A later confirmed login to a remaining account can still be adopted.
+        assert!(reconcile_active_account_with_live_auth(
+            &mut store,
+            &auth("workspace-second", "s2")
+        ));
+        assert_eq!(store.active_account_id.as_deref(), Some(second.id.as_str()));
+    }
+
+    #[test]
+    fn deleting_inactive_account_preserves_the_active_login() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let first = account("First", "workspace-first", "f1");
+        let second = account("Second", "workspace-second", "s1");
+        super::save_accounts(&AccountsStore {
+            accounts: vec![first.clone(), second.clone()],
+            active_account_id: Some(first.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+
+        super::remove_account(&second.id).unwrap();
+        let store = super::load_accounts().unwrap();
+        assert_eq!(store.active_account_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-f1");
+    }
+
+    #[test]
+    fn atomic_write_preserves_an_unowned_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("cs-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accounts.json");
+        let existing_tmp = dir.join(format!(".accounts.json.tmp-{}", std::process::id()));
+        std::fs::write(&existing_tmp, "another writer's content").unwrap();
+
+        super::atomic_write_private(&path, b"new document", 0).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new document");
+        assert_eq!(
+            std::fs::read_to_string(&existing_tmp).unwrap(),
+            "another writer's content"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn simultaneous_atomic_writes_publish_complete_documents() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!("cs-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accounts.json");
+        const WRITERS: usize = 8;
+        const ROUNDS: usize = 4;
+        let payloads: Arc<Vec<Vec<u8>>> = Arc::new(
+            (0..WRITERS)
+                .map(|writer| {
+                    serde_json::to_vec(&serde_json::json!({
+                        "writer": writer,
+                        "payload": writer.to_string().repeat(64 * 1024),
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+        );
+        super::atomic_write_private(&path, &payloads[0], 0).unwrap();
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let failures = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for writer in 0..WRITERS {
+                let payloads = Arc::clone(&payloads);
+                let barrier = Arc::clone(&barrier);
+                let path = &path;
+                handles.push(scope.spawn(move || {
+                    let mut failures = Vec::new();
+                    for _ in 0..ROUNDS {
+                        barrier.wait();
+                        if let Err(error) = super::atomic_write_private(path, &payloads[writer], 0)
+                        {
+                            failures.push(format!("writer {writer}: {error}"));
+                        }
+                        match std::fs::read(path) {
+                            Ok(published) if payloads.iter().any(|whole| whole == &published) => {}
+                            Ok(_) => failures.push("published an incomplete document".into()),
+                            Err(error) => failures.push(format!("read failed: {error}")),
+                        }
+                    }
+                    failures
+                }));
+            }
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let remaining_files = std::fs::read_dir(&dir).unwrap().count();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(remaining_files, 1, "temporary files were not cleaned up");
     }
 
     #[test]

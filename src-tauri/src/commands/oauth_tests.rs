@@ -8,12 +8,22 @@ use std::fs;
 static OAUTH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn account(name: &str) -> StoredAccount {
+    use base64::Engine as _;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "sub": format!("test-subject-{name}"),
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": format!("test-workspace-{name}")
+            }
+        })
+        .to_string(),
+    );
     StoredAccount::new_chatgpt(
         name.into(),
         None,
         None,
         None,
-        format!("test-id-{name}"),
+        format!("header.{payload}.signature"),
         format!("test-access-{name}"),
         format!("test-refresh-{name}"),
         Some(format!("test-workspace-{name}")),
