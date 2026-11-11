@@ -194,40 +194,13 @@ const PROBE_TIMEOUT_SECS: u64 = 10;
 /// Windows has no probe yet; it reports "not checked" rather than a check that never ran.
 const PROBES_SUPPORTED: bool = cfg!(not(windows));
 /// Read-only status probe: fixed argv, no stdin, stderr dropped, stdout capped and handed only
-/// to the caller's parser (never logged or returned). Timeout, spawn failure or a read error is None.
+/// to the caller's parser (never logged or returned). Timeout, spawn failure or a read error is None;
+/// a timeout kills the whole process tree.
 #[cfg(not(windows))]
 async fn probe(binary: PathBuf, args: &[&str], secs: u64) -> Option<(bool, String)> {
-    use tokio::io::AsyncReadExt;
-    const STDOUT_CAP: u64 = 64 * 1024;
-    let path = format!(
-        "/opt/homebrew/bin:/usr/local/bin:{}",
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let mut cmd = tokio::process::Command::new(binary);
-    cmd.args(args)
-        .env("PATH", path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let run = async move {
-        let mut child = cmd.spawn().ok()?;
-        let mut out = child.stdout.take()?;
-        let mut buf = Vec::new();
-        (&mut out)
-            .take(STDOUT_CAP)
-            .read_to_end(&mut buf)
-            .await
-            .ok()?;
-        // Closing the pipe lets a chatty child exit on SIGPIPE instead of blocking on a full buffer.
-        drop(out);
-        let status = child.wait().await.ok()?;
-        Some((status.success(), String::from_utf8_lossy(&buf).into_owned()))
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(secs), run)
+    super::api_credits::run_capture(binary, args, secs, 64 * 1024)
         .await
         .ok()
-        .flatten()
 }
 #[cfg(windows)]
 async fn probe(_binary: PathBuf, _args: &[&str], _secs: u64) -> Option<(bool, String)> {
@@ -443,10 +416,17 @@ pub async fn launch_provider(provider: String) -> Result<(), String> {
             "cursor" => "Cursor",
             _ => "CredVault",
         };
-        let status = std::process::Command::new("/usr/bin/open")
-            .args(["-a", app])
-            .status()
-            .map_err(|_| "Could not open app")?;
+        // Async with a deadline so a stuck `open` can neither block a runtime worker nor hang the button.
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::process::Command::new("/usr/bin/open")
+                .args(["-a", app])
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| "Opening the app timed out")?
+        .map_err(|_| "Could not open app")?;
         return if status.success() {
             Ok(())
         } else {

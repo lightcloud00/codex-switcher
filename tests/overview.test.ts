@@ -288,7 +288,7 @@ test("a Claude row carries email, plan, 7-day left, reset and the status", () =>
   assert.equal(r.left, "59%");
   assert.equal(r.resets, "in 1d 2h");
   assert.equal(r.renews, "Expiry not recorded");
-  assert.equal(r.status, "OK");
+  assert.equal(r.status, "Ready");
   assert.equal(r.tone, "ok");
   assert.equal(r.inactive, false);
 });
@@ -302,7 +302,7 @@ test("a Claude seat without an email shows its id and without numbers shows dash
   assert.equal(r.account, "claude-mac-main");
   assert.equal(r.type, "Claude");
   assert.deepEqual([r.left, r.resets], ["Unknown", NONE]);
-  assert.deepEqual([r.status, r.tone], ["No usage yet", "muted"]);
+  assert.deepEqual([r.status, r.tone], ["Not used yet", "muted"]);
   const [reset] = buildClaudeRows([seat({ sevenDay: week({ used_pct: null, state: "reset" }) })], [], NOW);
   assert.deepEqual([reset.left, reset.resets], ["Unknown", NONE]);
 });
@@ -319,7 +319,7 @@ test("Claude left uses whichever usable 5-hour or weekly allowance is tighter", 
   const [r] = buildClaudeRows([seat({ fiveHour: week({ used_pct: 87 }), sevenDay: week({ used_pct: 41 }) })], [], NOW);
   assert.equal(r.left, "13%");
   const [unknown] = buildClaudeRows([seat({ fiveHour: null, sevenDay: null, status: "unknown" })], [], NOW);
-  assert.deepEqual([unknown.left, unknown.status, unknown.tone], ["Unknown", "Unknown", "muted"]);
+  assert.deepEqual([unknown.left, unknown.status, unknown.tone], ["Unknown", "No reading", "muted"]);
 });
 
 test("Claude seat dates come from the plan dates saved under the seat id", () => {
@@ -337,10 +337,10 @@ test("Claude seat dates come from the plan dates saved under the seat id", () =>
 test("a passed Claude renewal date says verify; a passed credit or key expiry marks the seat expired", () => {
   const [verify] = buildClaudeRows([seat()], [dates("claude-mac-main", { billingRenewsOn: "2026-10-01" })], NOW);
   assert.equal(verify.renews, "Recorded renews: Date passed · verify");
-  assert.deepEqual([verify.status, verify.inactive], ["OK", false]);
+  assert.deepEqual([verify.status, verify.inactive], ["Ready", false]);
   const [expired] = buildClaudeRows([seat()], [dates("claude-mac-main", { credentialExpiresOn: "2026-10-29" })], NOW);
   assert.equal(expired.renews, "Recorded key expires: Date passed · verify");
-  assert.deepEqual([expired.status, expired.tone, expired.inactive], ["expired", "bad", true]);
+  assert.deepEqual([expired.status, expired.tone, expired.inactive], ["Plan ended", "bad", true]);
 });
 
 test("a free Claude seat with nothing left is inactive", () => {
@@ -491,4 +491,25 @@ test("a broken Claude seat shows a dash, not a stale percent", () => {
   assert.equal(r.left, NONE);
   const [ok] = buildClaudeRows([seat({ promState: "ok", sevenDay: stale })], [], NOW);
   assert.equal(ok.left, "100% (stale)");
+});
+
+test("a Codex account whose plan has ended shows no reset countdown", () => {
+  const live = buildCodexRows([account({ usage: usage(), subscription_expires_at: "2026-12-04T00:00:00Z" })], NOW)[0];
+  assert.equal(live.resets, "in 1h 18m");
+  const ended = buildCodexRows([account({ usage: usage(), subscription_expires_at: "2026-10-20T00:00:00Z" })], NOW)[0];
+  assert.equal(ended.status, "expired");
+  assert.equal(ended.resets, NONE);
+  assert.match(ended.renews, /^Expired /);
+});
+
+test("Claude seats use the same short words as Use next", () => {
+  const word = (over: Partial<ClaudeSeat>) => buildClaudeRows([seat(over)], [], NOW)[0].status;
+  assert.equal(word({ status: "ok" }), "Ready");
+  assert.equal(word({ status: "near_limit", sevenDay: week({ used_pct: 96 }) }), "Almost empty");
+  assert.equal(word({ status: "exhausted", sevenDay: week({ used_pct: 100 }) }), "Empty");
+  assert.equal(word({ status: "no_usage_yet", sevenDay: null }), "Not used yet");
+  assert.equal(word({ status: "unknown", sevenDay: null }), "No reading");
+  assert.equal(word({ promState: "broken" }), "Not working");
+  const [ended] = buildClaudeRows([seat()], [{ id: "claude-mac-main", subscriptionExpiresOn: "2026-10-01" } as PlanDates], NOW);
+  assert.equal(ended.status, "Plan ended");
 });

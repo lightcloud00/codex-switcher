@@ -176,13 +176,16 @@ export function seatStatus(
   return "unknown";
 }
 
+/** The one set of short words for a seat's state; Use next, the Claude tab and Overview all use it. */
 const SEAT_STATUS_LABELS: Record<ClaudeSeatStatus, string> = {
-  ok: "OK",
-  near_limit: "Near limit",
-  exhausted: "Exhausted",
-  unknown: "Unknown",
-  no_usage_yet: "No usage yet",
+  ok: "Ready",
+  near_limit: "Almost empty",
+  exhausted: "Empty",
+  unknown: "No reading",
+  no_usage_yet: "Not used yet",
 };
+export const SEAT_NOT_WORKING = "Not working";
+export const SEAT_PLAN_ENDED = "Plan ended";
 
 export function seatStatusLabel(status: ClaudeSeatStatus): string {
   return SEAT_STATUS_LABELS[status];

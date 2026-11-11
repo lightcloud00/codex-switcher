@@ -4,6 +4,7 @@ import { ClaudeAccountManager } from "./ClaudeAccountManager";
 import { BlurredText } from "./AccountCard";
 import { claudeSubscriptionText, withSeatSubscriptions, type SeatSubscriptions } from "../lib/claudeSubscription";
 import { planDatesText } from "../lib/overview";
+import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
 import type { PlanDates } from "../lib/providerAccess";
 import {
   buildClaudeSeats,
@@ -16,11 +17,11 @@ import {
   noReadingLine,
   planLabel,
   SEAT_HEALTH_PROBLEM_STATES,
+  SEAT_NOT_WORKING,
   seatStatusLabel,
   seatSubtitle,
   seatTitle,
   stateLabel,
-  updatedAgo,
   windowTone,
   type WindowTone,
 } from "../lib/claudeUsage";
@@ -151,7 +152,7 @@ function SeatCard({
               <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${BADGE_NEUTRAL}`}>{plan}</span>
             )}
             <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_BADGE[seat.status]}`}>
-              {seatStatusLabel(seat.status)}
+              {seat.promState === "broken" ? SEAT_NOT_WORKING : seatStatusLabel(seat.status)}
             </span>
           </div>
           {(showHealth || seat.lockOrphaned) && (
@@ -290,7 +291,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
           {summary?.source_host === "mac" && <p className="text-xs text-gray-500">Fleet usage from Mac</p>}
           <p className="text-xs text-gray-500 dark:text-gray-400">
             {summary
-              ? `Updated ${updatedAgo(summary.generated_at, now)}`
+              ? checkedLine("Checked", summary.generated_at, newestSeatReadingAgeS(seats), now)
               : error || haveData
                 ? "claude-usage unavailable"
                 : "Reading Claude usage..."}

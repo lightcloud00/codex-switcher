@@ -629,9 +629,9 @@ function WeekStrip({
         key: entry.account.id,
         name: entry.account.name,
         blur: blurFor(entry.account.id),
-        events: stripEvents(entry, days),
+        events: stripEvents(entry, days, {}, now),
       })),
-    [entries, days, blurFor]
+    [entries, days, blurFor, now]
   );
   const seats = useMemo<StripRow[]>(
     () =>

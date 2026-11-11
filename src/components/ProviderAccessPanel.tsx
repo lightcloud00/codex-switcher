@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime, openExternalUrl } from "../lib/platform";
+import { CHECK_LIMITS_MS, failedCheckText, withTimeout } from "../lib/withTimeout.ts";
 import { buildGrokRows } from "../lib/clientStatus";
 import { planDatesText } from "../lib/overview";
 import { dateChanged, hasUnsavedDates, mergeRefresh, pendingDateLabel, PLAN_LABELS, signInLabel, type PlanDates, type PlanView, type SignIn } from "../lib/providerAccess";
@@ -18,6 +19,7 @@ export function ProviderAccessPanel() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
   const latest = useRef(0);
   // Dates and installed state come back at once; the slower sign-in probes fill in afterwards. A newer refresh supersedes an older one.
@@ -26,29 +28,29 @@ export function ProviderAccessPanel() {
     const current = () => run === latest.current;
     setBusy(true); setChecking(false); setError("");
     try {
-      const next = await invokeBackend<Access>("get_provider_access");
+      const next = await withTimeout(invokeBackend<Access>("get_provider_access"), CHECK_LIMITS_MS.local);
       if (!current()) return;
       setView(old => mergeRefresh(old, next));
-    } catch(e) { if (current()) setError(String(e)); return; } finally { if (current()) setBusy(false); }
+    } catch(e) { if (current()) setError(failedCheckText(e)); return; } finally { if (current()) setBusy(false); }
     if (!isTauriRuntime()) return;
     setChecking(true);
     try {
-      const { providers } = await invokeBackend<{ providers: Provider[] }>("check_provider_sign_in");
+      const { providers } = await withTimeout(invokeBackend<{ providers: Provider[] }>("check_provider_sign_in"), CHECK_LIMITS_MS.signIn);
       if (current()) setView(old => old.data ? { ...old, data: { ...old.data, providers } } : old);
-    } catch(e) { if (current()) setError(String(e)); } finally { if (current()) setChecking(false); }
+    } catch(e) { if (current()) setError(failedCheckText(e)); } finally { if (current()) setChecking(false); }
   }
   useEffect(() => { void refresh(); }, []);
   function edit(id: string, key: keyof Omit<PlanDates, "id">, value: string) {
     setView(old => old.data ? { ...old, data: { ...old.data, plans: old.data.plans.map(p => p.id === id ? {...p, [key]: value || null} : p) } } : old); setMessage("");
   }
-  async function save() { if (!data) return; const plans = data.plans; setBusy(true); setError(""); try { await invokeBackend("save_provider_dates", {plans}); setView(old => ({ ...old, saved: copyPlans(plans) })); setMessage("Dates saved on this computer."); } catch(e) { setError(String(e)); } finally { setBusy(false); } }
-  async function launch(id: string) { setError(""); try { await invokeBackend("launch_provider", {provider: id}); setMessage(id === "credvault" ? "CredVault status check completed." : "Opened provider. Tool access depends on its active client and permissions."); } catch(e) { setError(String(e)); } }
+  async function save() { if (!data) return; const plans = data.plans; setSaving(true); setError(""); try { await withTimeout(invokeBackend("save_provider_dates", {plans}), CHECK_LIMITS_MS.local); setView(old => ({ ...old, saved: copyPlans(plans) })); setMessage("Dates saved on this computer."); } catch(e) { setError(String(e instanceof Error ? e.message : e)); } finally { setSaving(false); } }
+  async function launch(id: string) { setError(""); try { await withTimeout(invokeBackend("launch_provider", {provider: id}), CHECK_LIMITS_MS.launch); setMessage(id === "credvault" ? "CredVault status check completed." : "Opened provider. Tool access depends on its active client and permissions."); } catch(e) { setError(failedCheckText(e)); } }
   const unsavedDates = !!data && hasUnsavedDates(data.plans, saved);
   // One line per plan that has any date set, shown while the editor is closed.
   const dateSummaries = (data?.plans ?? []).map(p => ({ id: p.id, text: planDatesText(p) })).filter(s => s.text);
   return <section aria-label="Provider access" className="space-y-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} disabled={busy || checking} className="rounded-lg border px-3 py-2 text-sm">{busy ? "Refreshing…" : checking ? "Checking sign-in…" : "Refresh local status"}</button></div>
-    {error && <p role="alert" className="text-red-600 dark:text-red-300">{error}</p>}
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">Providers & plan dates</h2><button onClick={() => void refresh()} disabled={busy || checking} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">{busy ? "Refreshing…" : checking ? "Checking sign-in…" : "Refresh local status"}</button></div>
+    {error && <p role="alert" className="flex flex-wrap items-center gap-3 text-red-600 dark:text-red-300">{error}<button onClick={() => void refresh()} className="rounded-lg border px-3 py-1.5 text-sm">Retry</button></p>}
     {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
     <div className="grid gap-3 md:grid-cols-3">{data?.providers.map(p => <article key={p.id} className="rounded-xl border border-gray-200 p-4 dark:border-gray-700 space-y-3">
       <h3 className="font-semibold">{p.label}</h3><p className="text-xs text-gray-500">{p.installed ? "CLI found" : "CLI not found in checked locations"} · <span title={p.signInDetail} className={SIGN_IN_TONE[p.signedIn] ?? SIGN_IN_TONE.unknown}>{signInLabel(p.signedIn, checking && p.installed)}</span></p>
@@ -88,7 +90,7 @@ export function ProviderAccessPanel() {
               {p[key] && <button type="button" aria-label={`Clear ${PLAN_LABELS[p.id]} ${label}`} onClick={() => edit(p.id, key, "")} className="rounded border px-1.5 py-0.5">Clear</button>}</div>
           </div>;
         })}
-      </div></fieldset>)}<div className="flex items-center gap-3"><button disabled={busy || !data || !unsavedDates} onClick={() => void save()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Save dates</button>{unsavedDates && <span className="text-sm text-amber-700 dark:text-amber-300">Unsaved changes</span>}</div>
+      </div></fieldset>)}<div className="flex items-center gap-3"><button disabled={saving || busy || !data || !unsavedDates} onClick={() => void save()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900">Save dates</button>{unsavedDates && <span className="text-sm text-amber-700 dark:text-amber-300">Unsaved changes</span>}</div>
       </div></details>
     </div>
     {data && <p className="text-xs text-gray-500">Local check: {new Date(data.checkedAt).toLocaleString()}. CLI discovery does not prove model, shell, MCP or file access.</p>}

@@ -304,8 +304,8 @@ test("seatStatus: no account is 'no usage yet'; a missing weekly reading is unkn
 });
 
 test("seatStatusLabel, hostLabel, planLabel", () => {
-  assert.equal(seatStatusLabel("no_usage_yet"), "No usage yet");
-  assert.equal(seatStatusLabel("near_limit"), "Near limit");
+  assert.equal(seatStatusLabel("no_usage_yet"), "Not used yet");
+  assert.equal(seatStatusLabel("near_limit"), "Almost empty");
   assert.equal(hostLabel("win"), "Windows");
   assert.equal(hostLabel("mac"), "Mac");
   assert.equal(hostLabel("wsl"), "WSL");
@@ -370,7 +370,7 @@ test("a seat with no usage yet still shows, including one the registry does not 
   assert.equal(s096.launcher, "claude-096");
   assert.equal(seatTitle(s096), "claude-mac-096");
   assert.equal(seatSubtitle(s096), "Mac");
-  assert.equal(seatStatusLabel(s096.status), "No usage yet");
+  assert.equal(seatStatusLabel(s096.status), "Not used yet");
 });
 
 test("claude-096 picks up usage under either its seat id or its claude-usage label", () => {

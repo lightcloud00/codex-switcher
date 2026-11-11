@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
+import { CHECK_LIMITS_MS, failedCheckText, withTimeout } from "../lib/withTimeout.ts";
 import { BlurredText } from "./AccountCard";
 import type { ApiCreditsSnapshot } from "../lib/apiCredits";
 import { buildGrokRows, buildToolRows, type ClientStatusSnapshot } from "../lib/clientStatus";
-import { updatedAgo } from "../lib/claudeUsage";
+import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
 import {
   buildApiCreditRows,
   buildClaudeRows,
@@ -50,6 +51,7 @@ function Section({
   isMasked,
   empty,
   note = "",
+  onRetry,
 }: {
   title: string;
   rows: OverviewRow[];
@@ -58,6 +60,8 @@ function Section({
   empty: string;
   /** A muted line under the table, e.g. a source that failed or is still loading. */
   note?: string;
+  /** When set and `note` is a failure, shows a Retry button that restarts only this section's check. */
+  onRetry?: () => void;
 }) {
   return (
     <section aria-label={title} className="min-w-0">
@@ -69,7 +73,8 @@ function Section({
           {rows.map((row) => <OverviewCompactRow key={row.id} row={row} blur={isMasked(row)} />)}
         </div>
       )}
-      {note && <details className="mt-1 text-xs text-gray-500 dark:text-gray-400"><summary className="cursor-pointer">Details</summary><p className="break-words">{note}</p></details>}
+      {onRetry && note && <p role="alert" className="mt-1 flex flex-wrap items-center gap-2 text-xs text-red-600 dark:text-red-300">{note}<button type="button" onClick={onRetry} className="rounded-md border px-2 py-0.5">Retry</button></p>}
+      {!onRetry && note && <details className="mt-1 text-xs text-gray-500 dark:text-gray-400"><summary className="cursor-pointer">Details</summary><p className="break-words">{note}</p></details>}
     </section>
   );
 }
@@ -148,11 +153,11 @@ export function OverviewPanel({
     setCreditsLoading(true);
     setCreditsError("");
     try {
-      const next = await invokeBackend<ApiCreditsSnapshot>("get_api_credits");
+      const next = await withTimeout(invokeBackend<ApiCreditsSnapshot>("get_api_credits"), CHECK_LIMITS_MS.credits);
       creditsCache = { at: Date.now(), data: next };
       if (run === latestCredits.current) setCredits(next);
     } catch (e) {
-      if (run === latestCredits.current) setCreditsError(String(e));
+      if (run === latestCredits.current) setCreditsError(failedCheckText(e));
     } finally {
       if (run === latestCredits.current) setCreditsLoading(false);
     }
@@ -171,11 +176,11 @@ export function OverviewPanel({
     setClientLoading(true);
     setClientError("");
     try {
-      const next = await invokeBackend<ClientStatusSnapshot>("get_client_status");
+      const next = await withTimeout(invokeBackend<ClientStatusSnapshot>("get_client_status"), CHECK_LIMITS_MS.clients);
       clientCache = { at: Date.now(), data: next };
       if (run === latestClient.current) setClient(next);
     } catch (e) {
-      if (run === latestClient.current) setClientError(String(e));
+      if (run === latestClient.current) setClientError(failedCheckText(e));
     } finally {
       if (run === latestClient.current) setClientLoading(false);
     }
@@ -211,10 +216,10 @@ export function OverviewPanel({
   const subscriptionsEmpty = accountsLoading ? "Loading Codex accounts…" : accountsError ? "Account data unavailable." : registryError && !registry ? "Claude seats unavailable until visibility registry responds." : "No subscription accounts yet.";
   const clientEmpty = !desktop
     ? "Tool and Grok status is checked from the desktop app only."
-    : clientLoading ? "Checking clients and the three Grok Bots…" : "No status reported.";
+    : clientLoading ? "Checking clients and the three Grok Bots…" : clientError ? "Couldn't check." : "No status reported.";
   const prepaidEmpty = !desktop
     ? "API credits are checked from the desktop app only."
-    : creditsLoading ? "Checking providers through CredVault…" : "No providers reported.";
+    : creditsLoading ? "Checking providers through CredVault…" : creditsError ? "Couldn't check." : "No providers reported.";
 
   return (
     <div className="min-w-0 space-y-6">
@@ -222,7 +227,7 @@ export function OverviewPanel({
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Overview</h2>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            {summary ? `Claude usage updated ${updatedAgo(summary.generated_at, now)}` : "Every account and quota in one place"}
+            {summary ? checkedLine("Claude usage checked", summary.generated_at, newestSeatReadingAgeS(seats), now) : "Every account and quota in one place"}
           </p>
           {(summary?.source_host === "mac" || client?.source_host === "mac" || credits?.source_host === "mac") &&
             <p className="text-xs text-gray-500">
@@ -237,10 +242,12 @@ export function OverviewPanel({
             void loadCredits(true);
             void loadClient(true);
           }}
+          // Each check now ends by its deadline, so waiting is short; a second click would start a second
+          // CredVault probe beside the first and both could fail on "broker busy".
           disabled={busy}
           className="h-9 rounded-lg bg-gray-900 px-4 text-sm font-medium text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-black dark:hover:bg-neutral-900"
         >
-          {busy ? "Refreshing..." : "Refresh"}
+          {busy ? "Refreshing…" : "Refresh"}
         </button>
       </div>
 
@@ -257,9 +264,10 @@ export function OverviewPanel({
         isMasked={isMasked}
         empty={prepaidEmpty}
         note={creditsError}
+        onRetry={desktop ? () => void loadCredits(true) : undefined}
       />
-      <Section title="Grok Bots" rows={grok} isMasked={isMasked} empty={clientEmpty} note={clientError} />
-      <Section title="Tools (IDE / CLI)" rows={tools} isMasked={isMasked} empty={clientEmpty} note={clientError} />
+      <Section title="Grok Bots" rows={grok} isMasked={isMasked} empty={clientEmpty} note={clientError} onRetry={desktop ? () => void loadClient(true) : undefined} />
+      <Section title="Tools (IDE / CLI)" rows={tools} isMasked={isMasked} empty={clientEmpty} note={clientError} onRetry={desktop ? () => void loadClient(true) : undefined} />
 
       <p className="text-xs text-gray-400 dark:text-gray-500">
         Left is the Codex window with the least remaining, the limiting current 5-hour or weekly window for Claude, and the provider balance for

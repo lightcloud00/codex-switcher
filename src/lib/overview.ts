@@ -16,6 +16,8 @@ import {
   limitBarNotes,
   planLabel,
   resetCountdown,
+  SEAT_NOT_WORKING,
+  SEAT_PLAN_ENDED,
   seatStatusLabel,
   seatSubtitle,
   seatTitle,
@@ -194,7 +196,8 @@ export function buildCodexRows(accounts: AccountWithUsage[], nowMs: number): Ove
       activeLogin: a.is_active,
       type: `Codex ${plan}`,
       left: `${leftText(window?.used)}${stale ? " (stale)" : ""}`,
-      resets: window ? unixResetText(window.resetsAt, nowMs) : NONE,
+      // An ended plan has no next reset to count down to.
+      resets: window && !expired ? unixResetText(window.resetsAt, nowMs) : NONE,
       renews: codexExpiryText(a.subscription_expires_at, nowMs),
       ...codexStatus(expired, error, window, stale),
       inactive: isInactive(expired, a.plan_type, window?.used ?? null),
@@ -240,8 +243,10 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
     const used = limiting?.used_pct ?? null;
     const stale = windows.some(w => w?.state !== "current");
     const exhaustedNow = current.some(w => w!.used_pct! >= 100);
-    const status = exhaustedNow ? "Exhausted" : stale ? "Stale" : used === null ? (seat.status === "no_usage_yet" ? "No usage yet" : "Unknown") : seatStatusLabel(seat.status);
-    const tone: OverviewTone = exhaustedNow ? "bad" : stale ? "warn" : used === null ? "muted" : SEAT_TONE[seat.status];
+    // Same short words as Use next (seatStatusLabel); a broken seat or an ended plan says so first.
+    const broken = seat.promState === "broken";
+    const status = broken ? SEAT_NOT_WORKING : exhaustedNow ? seatStatusLabel("exhausted") : stale ? "Stale" : used === null ? seatStatusLabel(seat.status === "no_usage_yet" ? "no_usage_yet" : "unknown") : seatStatusLabel(seat.status);
+    const tone: OverviewTone = broken ? "bad" : exhaustedNow ? "bad" : stale ? "warn" : used === null ? "muted" : SEAT_TONE[seat.status];
     const plan = planLabel(seat.plan);
     const left = leftText(used);
     return {
@@ -252,7 +257,7 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
       left: seat.promState === "broken" ? NONE : used !== null && limiting?.state === "stale" ? `${left} (stale)` : used === null ? "Unknown" : stale && !exhaustedNow ? `${left} (partial)` : left,
       resets: (used !== null && limitBarNotes(limiting, nowMs).countdown) || NONE,
       renews: planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs),
-      status: expired ? "expired" : status,
+      status: expired ? SEAT_PLAN_ENDED : status,
       tone: expired ? "bad" : tone,
       inactive: isInactive(expired, seat.plan, used),
     };

@@ -201,9 +201,19 @@ export function failedCheckText(lastGoodAt: number | null, now: number): string 
   return lastGoodAt === null ? "Last check failed" : `Last check failed · last good reading ${formatAgo(lastGoodAt, now)}`;
 }
 
+/** The plan has ended: the status says so, or its end date is behind us. An ended plan has no reset to wait for. */
+export function planEnded(row: UseNextRow, now: number): boolean {
+  if (row.status === "expired") return true;
+  // A failed check or a missing reading is its own problem and keeps its own line.
+  if (row.status !== "clean" && row.status !== "busy" && row.status !== "exhausted") return false;
+  const ends = toMs(row.subscription_expires_at);
+  return ends !== null && ends <= now;
+}
+
 /** The one line under a row: what happens to this account next. */
 export function rowLine(entry: UseNextEntry, now: number, format: WhenFormat = {}): string {
   const { row, account } = entry;
+  if (planEnded(row, now)) return `Plan ended ${formatDay(toMs(row.subscription_expires_at), now, format)} · renew to use`;
   const window = bindingWindow(account.usage);
   const resets =
     window && window.resetsAt !== null
@@ -439,12 +449,17 @@ export function eventsOnDays(items: StripItem[], days: StripDay[], format: WhenF
 }
 
 /** What happens to an account on each strip day: when it comes back, its long window's reset, and its plan end. */
-export function stripEvents(entry: UseNextEntry, days: StripDay[], format: WhenFormat = {}): Map<string, StripEvent[]> {
+export function stripEvents(entry: UseNextEntry, days: StripDay[], format: WhenFormat = {}, now: number = Date.now()): Map<string, StripEvent[]> {
   const { row, account } = entry;
   const items: StripItem[] = [];
+  // An ended plan only marks its end: no comes-back or reset event.
+  if (planEnded(row, now)) {
+    items.push({ kind: "ends", at: toMs(row.subscription_expires_at) });
+    return eventsOnDays(items, days, format);
+  }
   if (row.status === "exhausted") items.push({ kind: "back", at: toMs(row.back_at) });
   const long = usageWindows(account.usage).long;
-  if (row.status !== "expired" && long) items.push({ kind: "reset", at: long.resetsAt, window: windowLabel(long.minutes) });
+  if (long) items.push({ kind: "reset", at: long.resetsAt, window: windowLabel(long.minutes) });
   items.push({ kind: "ends", at: toMs(row.subscription_expires_at) });
   return eventsOnDays(items, days, format);
 }
