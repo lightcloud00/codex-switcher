@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { BlurredText } from "./AccountCard";
+import { useClaudeSources } from "../hooks/useClaudeSources";
+import {
+  claudeNextRows,
+  claudeRowLine,
+  claudeStripEvents,
+  type ClaudeNextRow,
+  type ClaudePlanEndKind,
+} from "../lib/claudeNext";
+import { claudeSeatsFromSources } from "../lib/overview";
 import {
   formatAgo,
   formatClock,
@@ -11,6 +20,7 @@ import {
   MARKED_DAYS,
   NONE,
   planEntries,
+  planLine,
   planText,
   rowLine,
   statusBadge,
@@ -20,6 +30,8 @@ import {
   whyText,
   windowUsageText,
   type HeroPick,
+  type StripDay,
+  type StripEvent,
   type StripEventKind,
   type UseNextEntry,
   type UseNextTone,
@@ -112,24 +124,48 @@ export function NextAccountsPanel({
 }: NextAccountsPanelProps) {
   const [now, setNow] = useState(() => Date.now());
   const [openDetails, setOpenDetails] = useState<ReadonlySet<string>>(NO_IDS);
+  const claude = useClaudeSources();
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
     return () => window.clearInterval(id);
   }, []);
   // A new plan or reading moves the clock too, so a countdown never lags the data it explains.
-  useEffect(() => setNow(Date.now()), [plan, accounts]);
+  useEffect(() => setNow(Date.now()), [plan, accounts, claude.loadedAt]);
 
   const entries = useMemo(() => planEntries(plan, accounts), [plan, accounts]);
   const pick = useMemo(() => heroPick(entries), [entries]);
-  const blurFor = (accountId: string) => masked || maskedAccountIds.has(accountId);
+  const { summary, registry, registryError, prom, plans: claudePlans } = claude;
+  const claudeRows = useMemo(
+    () =>
+      registryError && !registry
+        ? []
+        : claudeNextRows(claudeSeatsFromSources(summary, registry, prom, now), claudePlans, now),
+    [summary, registry, registryError, prom, claudePlans, now]
+  );
+  const claudeSection = (
+    <ClaudeSeatsSection
+      rows={claudeRows}
+      now={now}
+      blur={masked}
+      loading={claude.loading && claude.loadedAt === 0}
+      unavailable={registryError && !registry}
+    />
+  );
+  const blurFor = useCallback(
+    (accountId: string) => masked || maskedAccountIds.has(accountId),
+    [masked, maskedAccountIds]
+  );
   const busy = disabled || openingId !== null;
 
   if (accounts.length === 0) {
     return (
-      <p className="py-10 text-center text-base text-gray-600 dark:text-gray-400">
-        {accountsLoading ? "Loading accounts..." : "No Codex accounts yet. Add one on the Codex tab."}
-      </p>
+      <section aria-label="Use next" className="min-w-0 space-y-6">
+        <p className="py-10 text-center text-base text-gray-600 dark:text-gray-400">
+          {accountsLoading ? "Loading accounts..." : "No Codex accounts yet. Add one on the Codex tab."}
+        </p>
+        {claudeSection}
+      </section>
     );
   }
 
@@ -161,9 +197,12 @@ export function NextAccountsPanel({
       )}
 
       {!plan && !planError ? (
-        <p className="py-10 text-center text-base text-gray-600 dark:text-gray-400">
-          {lastChecked(accounts) === null ? "Checking usage..." : "Ranking accounts..."}
-        </p>
+        <>
+          <p className="py-10 text-center text-base text-gray-600 dark:text-gray-400">
+            {lastChecked(accounts) === null ? "Checking usage..." : "Ranking accounts..."}
+          </p>
+          {claudeSection}
+        </>
       ) : (
         <>
           {(pick.kind === "ready" || pick.kind === "keep") && (
@@ -202,11 +241,14 @@ export function NextAccountsPanel({
             </ol>
           </section>
 
-          <WeekStrip entries={entries} now={now} blurFor={blurFor} />
+          {claudeSection}
+
+          <WeekStrip entries={entries} claudeRows={claudeRows} now={now} blurFor={blurFor} claudeBlur={masked} />
 
           <p className="text-sm text-gray-600 dark:text-gray-400">
             Order: ready accounts first, the plan that ends soonest first (router_plan's order). Then the one in
-            use, empty ones by when they come back, failed readings, and ended plans.
+            use, empty ones by when they come back, failed readings, and ended plans. Claude seats: most left
+            first, then empty ones by when they come back.
           </p>
         </>
       )}
@@ -215,14 +257,17 @@ export function NextAccountsPanel({
 }
 
 function StatusChip({ status }: { status: UseNextStatus }) {
-  const badge = statusBadge(status);
-  const tone = CHIP[badge.tone];
+  return <ToneChip {...statusBadge(status)} />;
+}
+
+function ToneChip({ label, tone: toneName }: { label: string; tone: UseNextTone }) {
+  const tone = CHIP[toneName];
   return (
     <span
       className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${tone.chip}`}
     >
       <span aria-hidden="true" className={`h-2 w-2 rounded-full ${tone.dot}`} />
-      {badge.label}
+      {label}
     </span>
   );
 }
@@ -424,6 +469,7 @@ function AccountRow({
   const button = openLabel(active, opening, canOpenCodex);
   const held = row.status === "expired" || row.status === "no_usage" || row.status === "refresh_failed";
   const line = rowLine(entry, now);
+  const plan = planLine(row, now);
   const detailsId = `use-next-details-${row.position}`;
 
   return (
@@ -441,6 +487,7 @@ function AccountRow({
           <p className="mt-1 truncate text-sm text-gray-700 dark:text-gray-300" title={line}>
             {line}
           </p>
+          {plan && <p className="mt-0.5 text-sm text-gray-600 dark:text-gray-400">{plan}</p>}
         </div>
         <p
           className={`w-24 text-right tabular-nums ${held ? "text-gray-500 dark:text-gray-400" : "text-gray-900 dark:text-gray-100"}`}
@@ -527,17 +574,47 @@ function AccountDetails({ id, entry, now, blur }: { id: string; entry: UseNextEn
   );
 }
 
+interface StripRow {
+  key: string;
+  name: string;
+  blur: boolean;
+  events: Map<string, StripEvent[]>;
+}
+
 function WeekStrip({
   entries,
+  claudeRows,
   now,
   blurFor,
+  claudeBlur,
 }: {
   entries: UseNextEntry[];
+  claudeRows: ClaudeNextRow[];
   now: number;
   blurFor: (accountId: string) => boolean;
+  claudeBlur: boolean;
 }) {
   const days = useMemo(() => stripDays(now), [now]);
-  const events = useMemo(() => entries.map((entry) => stripEvents(entry, days)), [entries, days]);
+  const codex = useMemo<StripRow[]>(
+    () =>
+      entries.map((entry) => ({
+        key: entry.account.id,
+        name: entry.account.name,
+        blur: blurFor(entry.account.id),
+        events: stripEvents(entry, days),
+      })),
+    [entries, days, blurFor]
+  );
+  const seats = useMemo<StripRow[]>(
+    () =>
+      claudeRows.map((row) => ({
+        key: `claude:${row.id}`,
+        name: row.title,
+        blur: claudeBlur,
+        events: claudeStripEvents(row, days),
+      })),
+    [claudeRows, days, claudeBlur]
+  );
   const showsMarked = days.some((day) => day.marked);
   const markedCell = "bg-violet-50 dark:bg-violet-950/50";
 
@@ -567,7 +644,8 @@ function WeekStrip({
       <div className="relative mt-3 overflow-x-auto">
         <table className="w-full min-w-[720px] table-fixed border-collapse text-xs">
           <caption className="sr-only">
-            When each Codex account comes back, has a usage reset, or its plan ends, over the next {days.length} days
+            When each Codex account and Claude seat comes back, has a usage reset, or its plan ends, over the next{" "}
+            {days.length} days
           </caption>
           <colgroup>
             <col className="w-44" />
@@ -597,34 +675,147 @@ function WeekStrip({
               ))}
             </tr>
           </thead>
-          <tbody>
-            {entries.map((entry, index) => (
-              <tr key={entry.account.id} className="border-t border-gray-100 dark:border-gray-800">
-                <th
-                  scope="row"
-                  className="truncate px-2 py-2 text-left font-medium text-gray-900 dark:text-gray-100"
-                  title={blurFor(entry.account.id) ? undefined : entry.account.name}
-                >
-                  <BlurredText blur={blurFor(entry.account.id)}>{entry.account.name}</BlurredText>
-                </th>
-                {days.map((day) => (
-                  <td key={day.key} className={`px-1 py-2 text-center align-top ${day.marked ? markedCell : ""}`}>
-                    {(events[index].get(day.key) ?? []).map((event) => (
-                      <div key={`${event.kind}-${event.at}`} className={`whitespace-nowrap ${STRIP_EVENT[event.kind].className}`}>
-                        <span aria-hidden="true">{STRIP_EVENT[event.kind].glyph} </span>
-                        <span className="sr-only">
-                          {event.window ? `${event.window} reset` : STRIP_EVENT[event.kind].word} at{" "}
-                        </span>
-                        {event.time}
-                      </div>
-                    ))}
-                  </td>
+          {[
+            { label: "Codex", rows: codex },
+            { label: "Claude", rows: seats },
+          ]
+            .filter((group) => group.rows.length > 0)
+            .map((group, _index, groups) => (
+              <tbody key={group.label}>
+                {groups.length > 1 && <GroupRow label={group.label} span={days.length + 1} />}
+                {group.rows.map((row) => (
+                  <StripTableRow key={row.key} row={row} days={days} markedCell={markedCell} />
                 ))}
-              </tr>
+              </tbody>
             ))}
-          </tbody>
         </table>
       </div>
     </section>
+  );
+}
+
+function GroupRow({ label, span }: { label: string; span: number }) {
+  return (
+    <tr className="border-t border-gray-200 dark:border-gray-700">
+      <th
+        scope="rowgroup"
+        colSpan={span}
+        className="px-2 pb-1 pt-3 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400"
+      >
+        {label}
+      </th>
+    </tr>
+  );
+}
+
+function StripTableRow({ row, days, markedCell }: { row: StripRow; days: StripDay[]; markedCell: string }) {
+  return (
+    <tr className="border-t border-gray-100 dark:border-gray-800">
+      <th
+        scope="row"
+        className="truncate px-2 py-2 text-left font-medium text-gray-900 dark:text-gray-100"
+        title={row.blur ? undefined : row.name}
+      >
+        <BlurredText blur={row.blur}>{row.name}</BlurredText>
+      </th>
+      {days.map((day) => (
+        <td key={day.key} className={`px-1 py-2 text-center align-top ${day.marked ? markedCell : ""}`}>
+          {(row.events.get(day.key) ?? []).map((event) => (
+            <div
+              key={`${event.kind}-${event.window ?? ""}-${event.at}`}
+              className={`whitespace-nowrap ${STRIP_EVENT[event.kind].className}`}
+            >
+              <span aria-hidden="true">{STRIP_EVENT[event.kind].glyph} </span>
+              <span className="sr-only">
+                {event.window ? `${event.window} reset` : STRIP_EVENT[event.kind].word}
+                {event.time ? " at " : ""}
+              </span>
+              {event.time || <span aria-hidden="true">{STRIP_EVENT[event.kind].word}</span>}
+            </div>
+          ))}
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+const PLAN_END_SOURCE: Record<ClaudePlanEndKind, string> = {
+  confirmed: "Confirmed date saved under Providers.",
+  recorded: "Date saved under Providers or in the fleet seat file; not checked against the account.",
+  estimate: "A guess: monthly billing from the recorded start date. Save the real date under Providers.",
+  none: "No date saved. Add it under Providers.",
+};
+
+function ClaudeSeatsSection({
+  rows,
+  now,
+  blur,
+  loading,
+  unavailable,
+}: {
+  rows: ClaudeNextRow[];
+  now: number;
+  blur: boolean;
+  loading: boolean;
+  unavailable: boolean;
+}) {
+  return (
+    <section aria-labelledby="use-next-claude-heading" className="space-y-3">
+      <h3 id="use-next-claude-heading" className="text-base font-semibold text-gray-900 dark:text-gray-100">
+        Claude seats
+      </h3>
+      {rows.length === 0 ? (
+        <p className="text-sm text-gray-600 dark:text-gray-400">
+          {loading
+            ? "Checking Claude seats..."
+            : unavailable
+              ? "Claude seats could not be read. They come back on the next refresh."
+              : "No Claude seats found."}
+        </p>
+      ) : (
+        <ol className="divide-y divide-gray-200 overflow-hidden rounded-2xl border border-gray-200 bg-white dark:divide-gray-800 dark:border-gray-800 dark:bg-gray-900">
+          {rows.map((row) => (
+            <ClaudeSeatRow key={row.id} row={row} now={now} blur={blur} />
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function ClaudeSeatRow({ row, now, blur }: { row: ClaudeNextRow; now: number; blur: boolean }) {
+  const line = claudeRowLine(row, now);
+  const held = row.badge.tone === "muted";
+  const about = [row.plan && `Claude ${row.plan}`, row.subtitle].filter(Boolean).join(" · ");
+  return (
+    <li className="px-5 py-4" data-status={row.badge.label}>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+        <div className="min-w-[12rem] flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-words text-base font-semibold text-gray-900 dark:text-gray-100">
+              <BlurredText blur={blur}>{row.title}</BlurredText>
+            </span>
+            <ToneChip label={row.badge.label} tone={row.badge.tone} />
+            {about && <span className="text-xs text-gray-600 dark:text-gray-400">{about}</span>}
+          </div>
+          <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">{line}</p>
+          <p className="mt-0.5 text-sm text-gray-600 dark:text-gray-400">
+            <span title={PLAN_END_SOURCE[row.planEnd.kind]}>{row.planEnd.text}</span>
+            {row.oldReading && ` · last checked ${row.oldReading}`}
+          </p>
+        </div>
+        <p
+          className={`w-24 text-right tabular-nums ${held ? "text-gray-500 dark:text-gray-400" : "text-gray-900 dark:text-gray-100"}`}
+        >
+          {row.leftPercent === null ? (
+            <span className="text-2xl font-bold">{NONE}</span>
+          ) : (
+            <>
+              <span className="text-2xl font-bold">{row.leftPercent}%</span> <span className="text-sm">left</span>
+            </>
+          )}
+        </p>
+      </div>
+    </li>
   );
 }

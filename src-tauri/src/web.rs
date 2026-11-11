@@ -12,9 +12,9 @@ use tokio::runtime::Runtime;
 use crate::commands::{
     add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
     complete_login, delete_account, export_accounts_full_encrypted_bytes, fetch_claude_prometheus,
-    fetch_claude_seats, fetch_claude_usage, fetch_usage, get_account_usage_stats,
-    get_active_account_info, get_masked_account_ids, get_provider_access, get_use_next_plan,
-    import_accounts_full_encrypted_bytes, kill_codex_processes, list_accounts,
+    fetch_claude_seat_subscriptions, fetch_claude_seats, fetch_claude_usage, fetch_usage,
+    get_account_usage_stats, get_active_account_info, get_masked_account_ids, get_provider_access,
+    get_use_next_plan, import_accounts_full_encrypted_bytes, kill_codex_processes, list_accounts,
     refresh_account_metadata, refresh_all_accounts_usage, rename_account, save_provider_dates,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
     BackupUnlock, PlanDates,
@@ -191,6 +191,7 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         // Native process launch stays on the local desktop, never the LAN web route.
         "get_claude_usage" => fetch_claude_usage().await,
         "get_claude_seats" => fetch_claude_seats().await,
+        "get_claude_seat_subscriptions" => fetch_claude_seat_subscriptions().await,
         "set_claude_seat_archived" => {
             #[derive(Deserialize)]
             struct Args {

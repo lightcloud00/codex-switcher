@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invokeBackend } from "../lib/platform";
 import { ClaudeAccountManager } from "./ClaudeAccountManager";
 import { BlurredText } from "./AccountCard";
-import { claudeSubscriptionText } from "../lib/claudeSubscription";
+import { claudeSubscriptionText, withSeatSubscriptions, type SeatSubscriptions } from "../lib/claudeSubscription";
 import { planDatesText } from "../lib/overview";
 import type { PlanDates } from "../lib/providerAccess";
 import {
@@ -141,7 +141,7 @@ function SeatCard({
             </div>
           )}
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400"
-            title={savedDateText ? "Dates saved under Providers." : "Estimated from the recorded subscription start date assuming monthly billing. Claude does not provide a confirmed expiry date here."}>
+            title={savedDateText ? "Dates saved under Providers, or the end date in the fleet seat file." : "Estimated from the recorded subscription start date assuming monthly billing. Claude does not provide a confirmed expiry date here."}>
             {savedDateText || (savedDates?.billingInterval === "annual" ? "Annual billing · renewal not recorded" : savedDates?.billingInterval === "none" ? "Free · no paid expiry" : claudeSubscriptionText(seat, now))}
           </div>
         </div>
@@ -222,6 +222,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
   const [managing, setManaging] = useState(false);
   const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
   const [plans, setPlans] = useState<PlanDates[]>([]);
+  const [seatFile, setSeatFile] = useState<SeatSubscriptions | null>(null);
   const [registry, setRegistry] = useState<ClaudeSeatRegistry | null>(null);
   // undefined until the first answer; null when the Prometheus call itself failed.
   const [prom, setProm] = useState<ClaudePromSnapshot | null | undefined>(undefined);
@@ -234,7 +235,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     setLoading(true);
     // Each source is optional on its own: a failed claude-usage run, a missing registry or an
     // unreachable Prometheus leaves the rest of the tab (and the previous numbers) in place.
-    const [usage, seats, snapshot, providers] = await Promise.all([
+    const [usage, seats, snapshot, providers, subscriptions] = await Promise.all([
       invokeBackend<ClaudeUsageSummary>("get_claude_usage").then(
         (value) => ({ value, error: null as string | null }),
         (e: unknown) => ({ value: null, error: e instanceof Error ? e.message : String(e) }),
@@ -242,9 +243,11 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
       invokeBackend<ClaudeSeatRegistry>("get_claude_seats").catch(() => null),
       invokeBackend<ClaudePromSnapshot>("get_claude_prometheus").catch(() => null),
       invokeBackend<{ plans: PlanDates[] }>("get_provider_access").catch(() => null),
+      invokeBackend<SeatSubscriptions>("get_claude_seat_subscriptions").catch(() => null),
     ]);
     if (usage.value) setSummary(usage.value);
     if (providers) setPlans(providers.plans);
+    if (subscriptions) setSeatFile(subscriptions);
     if (seats) setRegistry(seats);
     setVisibilityUnavailable(!seats);
     setProm(snapshot);
@@ -273,6 +276,8 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     const entries = registry?.found ? registry.seats : summary ? null : [];
     return buildClaudeSeats(entries, summary?.accounts ?? [], prom, now, registry?.hidden_seat_ids);
   }, [haveData, summary, registry, prom, now]);
+  // Display only: the manager below edits the saved dates, never the seat file's.
+  const displayPlans = useMemo(() => withSeatSubscriptions(plans, seatFile), [plans, seatFile]);
   const allSeats = useMemo(() => buildClaudeSeats(registry?.seats ?? [], summary?.accounts ?? [], prom, now), [registry, summary, prom, now]);
   const tokens = summary?.local_tokens;
   const workers = summary?.workers;
@@ -324,7 +329,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
         <>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {seats.map((seat) => (
-              <SeatCard key={seat.id} seat={seat} now={now} masked={masked} usageUnavailable={!summary} savedDates={plans.find(p => p.id === seat.id)} />
+              <SeatCard key={seat.id} seat={seat} now={now} masked={masked} usageUnavailable={!summary} savedDates={displayPlans.find(p => p.id === seat.id)} />
             ))}
           </div>
           {summary && registry && !registry.found && (
