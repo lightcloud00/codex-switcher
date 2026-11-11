@@ -9,6 +9,7 @@ import {
   claudeStripEvents,
 } from "../src/lib/claudeNext.ts";
 import { withSeatSubscriptions, type SeatSubscriptions } from "../src/lib/claudeSubscription.ts";
+import { seatStatusLabel } from "../src/lib/claudeUsage.ts";
 import { planLine, stripDays } from "../src/lib/nextAccounts.ts";
 import type { PlanDates } from "../src/lib/providerAccess.ts";
 import type { ClaudeSeat, ClaudeUsageWindow, UseNextRow } from "../src/types/index.ts";
@@ -272,4 +273,14 @@ test("Codex rows show their plan end on the row; an ended plan's row already say
   } as unknown as UseNextRow;
   assert.equal(planLine(row, NOW, FORMAT), "Pro · ends Nov 23");
   assert.equal(planLine({ ...row, status: "expired" } as UseNextRow, NOW, FORMAT), null);
+});
+
+test("the Use next badge words are the shared seat status words", () => {
+  const now = Date.parse("2026-11-11T15:00:00Z");
+  const label = (over: Partial<ClaudeSeat>) => claudeNextRow(seat(over), undefined, now).badge.label;
+  assert.equal(label({ status: "near_limit", sevenDay: win(96, "2026-11-14T00:00:00Z") }), seatStatusLabel("near_limit"));
+  assert.equal(label({ status: "no_usage_yet" }), seatStatusLabel("no_usage_yet"));
+  assert.equal(label({ status: "unknown" }), seatStatusLabel("unknown"));
+  assert.equal(label({ status: "ok", sevenDay: win(10, "2026-11-14T00:00:00Z") }), seatStatusLabel("ok"));
+  assert.equal(seatStatusLabel("exhausted"), "Empty");
 });

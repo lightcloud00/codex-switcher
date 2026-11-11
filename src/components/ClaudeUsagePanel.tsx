@@ -4,6 +4,7 @@ import { ClaudeAccountManager } from "./ClaudeAccountManager";
 import { BlurredText } from "./AccountCard";
 import { claudeSubscriptionText, withSeatSubscriptions, type SeatSubscriptions } from "../lib/claudeSubscription";
 import { planDatesText } from "../lib/overview";
+import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
 import type { PlanDates } from "../lib/providerAccess";
 import {
   buildClaudeSeats,
@@ -20,7 +21,6 @@ import {
   seatSubtitle,
   seatTitle,
   stateLabel,
-  updatedAgo,
   windowTone,
   type WindowTone,
 } from "../lib/claudeUsage";
@@ -290,7 +290,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
           {summary?.source_host === "mac" && <p className="text-xs text-gray-500">Fleet usage from Mac</p>}
           <p className="text-xs text-gray-500 dark:text-gray-400">
             {summary
-              ? `Updated ${updatedAgo(summary.generated_at, now)}`
+              ? checkedLine("Checked", summary.generated_at, newestSeatReadingAgeS(seats), now)
               : error || haveData
                 ? "claude-usage unavailable"
                 : "Reading Claude usage..."}

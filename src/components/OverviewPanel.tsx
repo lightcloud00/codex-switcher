@@ -3,7 +3,7 @@ import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import { BlurredText } from "./AccountCard";
 import type { ApiCreditsSnapshot } from "../lib/apiCredits";
 import { buildGrokRows, buildToolRows, type ClientStatusSnapshot } from "../lib/clientStatus";
-import { updatedAgo } from "../lib/claudeUsage";
+import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
 import {
   buildApiCreditRows,
   buildClaudeRows,
@@ -222,7 +222,7 @@ export function OverviewPanel({
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Overview</h2>
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            {summary ? `Claude usage updated ${updatedAgo(summary.generated_at, now)}` : "Every account and quota in one place"}
+            {summary ? checkedLine("Claude usage checked", summary.generated_at, newestSeatReadingAgeS(seats), now) : "Every account and quota in one place"}
           </p>
           {(summary?.source_host === "mac" || client?.source_host === "mac" || credits?.source_host === "mac") &&
             <p className="text-xs text-gray-500">

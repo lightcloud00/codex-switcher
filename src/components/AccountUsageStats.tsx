@@ -6,6 +6,7 @@ import type {
   UsageInfo,
 } from "../types";
 import { invokeBackend } from "../lib/platform";
+import { usageStatsMessage } from "../lib/checkedAgo";
 
 interface AccountUsageStatsProps {
   accountId: string;
@@ -352,6 +353,8 @@ export function AccountUsageStats({
 }: AccountUsageStatsProps) {
   const [stats, setStats] = useState<AccountUsageStatsInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  // True once the stats call has run for this account, so "unavailable" never shows before it did.
+  const [attempted, setAttempted] = useState(false);
   const requestSeq = useRef(0);
   const backgroundInFlight = useRef(false);
   const lastObservedUsage = useRef<UsageInfo | undefined>(usage);
@@ -363,6 +366,7 @@ export function AccountUsageStats({
     if (!enabled) {
       if (background) return;
       const next = emptyStats(accountId, "Usage stats are available for ChatGPT accounts only.");
+      setAttempted(true);
       setStats(next);
       onStatsLoaded?.(next);
       setLoading(false);
@@ -379,10 +383,12 @@ export function AccountUsageStats({
         accountId,
       });
       if (requestId !== requestSeq.current) return;
+      setAttempted(true);
       if (background && (!next.available || next.error)) return;
       setStats(next);
       onStatsLoaded?.(next);
     } catch (err) {
+      if (requestId === requestSeq.current) setAttempted(true);
       if (background || requestId !== requestSeq.current) return;
       const next = emptyStats(accountId, err instanceof Error ? err.message : String(err));
       setStats(next);
@@ -399,6 +405,7 @@ export function AccountUsageStats({
   useEffect(() => {
     requestSeq.current += 1;
     setStats(null);
+    setAttempted(false);
     onStatsLoaded?.(null);
     setLoading(false);
   }, [accountId, onStatsLoaded]);
@@ -463,7 +470,7 @@ export function AccountUsageStats({
           </div>
         ) : (
           <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-            {currentStats?.error ?? "Usage stats unavailable."}
+            {usageStatsMessage(currentStats?.error, attempted)}
           </div>
         )}
       </div>

@@ -18,6 +18,7 @@ import {
   planEntries,
   planInputKey,
   planText,
+  planEnded,
   rowLine,
   statusBadge,
   stripDays,
@@ -313,7 +314,8 @@ test("stripEvents places back, weekly reset and plan end on their days", () => {
       { usage: usage({ secondary_used_percent: 100 }) }
     ),
     days,
-    ET
+    ET,
+    NOW
   );
   // The weekly reset is the same moment it comes back, so it shows once.
   assert.deepEqual(
@@ -323,9 +325,9 @@ test("stripEvents places back, weekly reset and plan end on their days", () => {
       ["2026-11-05", ["ends 8 PM"]],
     ]
   );
-  const ended = stripEvents(entry({ status: "expired", subscription_expires_at: "2026-09-05T19:00:48Z" }), days, ET);
+  const ended = stripEvents(entry({ status: "expired", subscription_expires_at: "2026-09-05T19:00:48Z" }), days, ET, NOW);
   assert.equal(ended.size, 0);
-  const later = stripEvents(entry({ subscription_expires_at: "2026-11-30T00:00:00Z" }), days, ET);
+  const later = stripEvents(entry({ subscription_expires_at: "2026-11-30T00:00:00Z" }), days, ET, NOW);
   assert.deepEqual([...later.keys()], ["2026-11-08"]);
   assert.equal(later.get("2026-11-08")?.[0].window, "weekly");
   // A free plan's monthly window is labelled as such, not as a weekly reset.
@@ -344,7 +346,8 @@ test("stripEvents places back, weekly reset and plan end on their days", () => {
       }
     ),
     days,
-    ET
+    ET,
+    NOW
   );
   assert.deepEqual(monthly.get("2026-11-06")?.map((event) => [event.kind, event.window]), [["reset", "30d"]]);
 });
@@ -406,4 +409,20 @@ test("planText prints Pro Max for promax and keeps other classes capitalized", (
   assert.equal(planText(row({ plan_class: "promax", subscription_expires_at: null }), NOW, ET), "Pro Max");
   assert.equal(planText(row({ plan_class: "plus", subscription_expires_at: null }), NOW, ET), "Plus");
   assert.equal(planText(row({ plan_class: "unknown", subscription_expires_at: null }), NOW, ET), "Plan unknown");
+});
+
+test("an ended plan shows no reset or back time, even when the status was not flagged expired", () => {
+  const ended = entry(
+    { status: "exhausted", back_at: "2026-11-03T22:00:00Z", subscription_expires_at: "2026-10-20T00:00:00Z" },
+    { usage: usage({ secondary_used_percent: 100 }) },
+  );
+  assert.equal(planEnded(ended.row, NOW), true);
+  assert.equal(plain(rowLine(ended, NOW, ET)), "Plan ended Oct 19 · renew to use");
+  const events = stripEvents(ended, stripDays(NOW, 10, ET), ET, NOW);
+  assert.deepEqual([...events.values()].flat().filter((event) => event.kind !== "ends"), []);
+  const busy = entry({ status: "busy", subscription_expires_at: "2026-10-20T00:00:00Z" });
+  assert.doesNotMatch(rowLine(busy, NOW, ET), /resets|In use/);
+  // A plan that has not ended keeps its reset; a failed check keeps its own line.
+  assert.equal(planEnded(entry({ subscription_expires_at: "2026-11-30T00:00:00Z" }).row, NOW), false);
+  assert.equal(planEnded(entry({ status: "refresh_failed", subscription_expires_at: "2026-10-20T00:00:00Z" }).row, NOW), false);
 });

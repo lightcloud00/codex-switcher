@@ -1,6 +1,6 @@
 import type { ClaudeSeat, ClaudeUsageWindow } from "../types";
 import { estimatedMonthlyRenewal } from "./claudeSubscription.ts";
-import { planLabel, seatSubtitle, seatTitle } from "./claudeUsage.ts";
+import { planLabel, SEAT_NOT_WORKING, SEAT_PLAN_ENDED, seatStatusLabel, seatSubtitle, seatTitle } from "./claudeUsage.ts";
 import {
   dayKey,
   eventsOnDays,
@@ -139,13 +139,13 @@ export function claudeResets(seat: ClaudeSeat, now: number, format: WhenFormat =
 function badgeFor(seat: ClaudeSeat, empty: boolean, ended: boolean, used: number | null): ClaudeNextRow["badge"] {
   // A passed end date with no current reading: the seat is likely gone. A seat still being read keeps its
   // usage badge, and the plan line asks to check the date (a renewal the seat file has not caught up with).
-  if (ended) return { label: "Plan ended", tone: "muted" };
-  if (seat.promState === "broken") return { label: "Not working", tone: "bad" };
-  if (empty || seat.status === "exhausted") return { label: "Empty", tone: "bad" };
-  if (seat.status === "near_limit") return { label: "Almost empty", tone: "warn" };
-  if (seat.status === "ok" && used !== null) return { label: "Ready", tone: "ok" };
-  if (seat.status === "no_usage_yet") return { label: "Not used yet", tone: "muted" };
-  return { label: "No reading", tone: "muted" };
+  if (ended) return { label: SEAT_PLAN_ENDED, tone: "muted" };
+  if (seat.promState === "broken") return { label: SEAT_NOT_WORKING, tone: "bad" };
+  if (empty || seat.status === "exhausted") return { label: seatStatusLabel("exhausted"), tone: "bad" };
+  if (seat.status === "near_limit") return { label: seatStatusLabel("near_limit"), tone: "warn" };
+  if (seat.status === "ok" && used !== null) return { label: seatStatusLabel("ok"), tone: "ok" };
+  if (seat.status === "no_usage_yet") return { label: seatStatusLabel("no_usage_yet"), tone: "muted" };
+  return { label: seatStatusLabel("unknown"), tone: "muted" };
 }
 
 /** One Use next row per seat: what is left, when each window resets, and when the plan ends. */
