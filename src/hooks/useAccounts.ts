@@ -358,7 +358,13 @@ export function useAccounts() {
     try {
       const account = await invokeBackend<AccountInfo>("complete_login");
       const accountList = await loadAccounts();
-      await refreshUsage(accountList);
+      // Do not hold the dialog on usage calls: refresh in the background,
+      // the new account first.
+      const ordered = [
+        ...accountList.filter((item) => item.id === account.id),
+        ...accountList.filter((item) => item.id !== account.id),
+      ];
+      void refreshUsage(ordered).catch(() => {});
       return account;
     } catch (err) {
       throw err;

@@ -140,8 +140,12 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     let store = load_accounts()?;
     match read_current_auth() {
         Ok(live_auth) if codex_uses_account(&store, &updated, live_auth.as_ref()) => {
+            // The old refresh token is spent, so a failed write leaves Codex
+            // holding a dead login. Say so instead of only logging it.
             if let Err(err) = switch_to_account(&updated) {
-                println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
+                return Err(err.context(
+                    "Tokens refreshed and saved, but the Codex login file could not be updated",
+                ));
             }
         }
         Ok(_) => {}
@@ -337,6 +341,36 @@ fn parse_jwt_exp(token: &str) -> Option<i64> {
     json.get("exp").and_then(|v| v.as_i64())
 }
 
+/// POST the refresh grant. Refresh tokens are single-use: the server may rotate
+/// one even when the reply is lost. So retry only when the request provably
+/// never reached the server (the connection could not be made). A timeout,
+/// reset or any error after sending is final: replaying would burn the token.
+async fn send_refresh_request(
+    client: &reqwest::Client,
+    url: &str,
+    body: &str,
+) -> Result<reqwest::Response> {
+    const MAX_ATTEMPTS: u8 = 3;
+    let mut attempt = 1u8;
+    loop {
+        match client
+            .post(url)
+            .timeout(Duration::from_secs(10))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body.to_string())
+            .send()
+            .await
+        {
+            Ok(resp) => return Ok(resp),
+            Err(err) if err.is_connect() && attempt < MAX_ATTEMPTS => {
+                sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err).context("Failed to send token refresh request"),
+        }
+    }
+}
+
 async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<RefreshTokenResponse> {
     let client = reqwest::Client::new();
     let body = format!(
@@ -345,38 +379,8 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
         urlencoding::encode(CLIENT_ID),
     );
 
-    let mut last_send_error = None;
-    let mut response = None;
-
-    for attempt in 1..=3u8 {
-        match client
-            .post(format!("{DEFAULT_ISSUER}/oauth/token"))
-            .timeout(Duration::from_secs(10))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body.clone())
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                response = Some(resp);
-                break;
-            }
-            Err(err) => {
-                last_send_error = Some(err);
-                if attempt < 3 {
-                    sleep(Duration::from_millis(250 * u64::from(attempt))).await;
-                }
-            }
-        }
-    }
-
-    let response = match response {
-        Some(resp) => resp,
-        None => {
-            let err = last_send_error.context("Failed to send token refresh request")?;
-            return Err(err.into());
-        }
-    };
+    let response =
+        send_refresh_request(&client, &format!("{DEFAULT_ISSUER}/oauth/token"), &body).await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -395,7 +399,7 @@ mod tests {
     use super::{
         chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, codex_holds_account,
         codex_uses_account, load_account_reconciling_live_auth, merge_refresh_response,
-        resolve_refreshed_id_token, RefreshTokenResponse,
+        resolve_refreshed_id_token, send_refresh_request, RefreshTokenResponse,
     };
     use crate::auth::test_support::TestHome;
     use crate::auth::{
@@ -689,5 +693,50 @@ mod tests {
         assert_eq!(update.id_token, current_id_token);
         assert_eq!(update.refresh_token, "rotated-refresh");
         assert!(update.id_token_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn refresh_is_not_replayed_after_connection_is_dropped() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((socket, _)) = listener.accept().await {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(socket);
+                }
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let result =
+            send_refresh_request(&client, &format!("http://{addr}/oauth/token"), "x=1").await;
+
+        assert!(result.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_is_retried_when_connection_is_refused() {
+        // Bind then drop to get a port nobody listens on.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let result = send_refresh_request(
+            &client,
+            &format!("http://127.0.0.1:{port}/oauth/token"),
+            "x=1",
+        )
+        .await;
+
+        assert!(result.is_err());
+        // Two backoff sleeps (250 ms + 500 ms) prove it retried.
+        assert!(started.elapsed() >= std::time::Duration::from_millis(700));
     }
 }

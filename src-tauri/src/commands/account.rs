@@ -2,9 +2,10 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
-    import_from_auth_json, import_from_auth_json_contents, load_accounts, read_current_auth,
-    reconcile_active_account_with_live_auth, remove_account, save_accounts, set_active_account,
-    switch_to_account, sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
+    import_from_auth_json, import_from_auth_json_contents, live_auth_may_hold_account,
+    load_accounts, read_current_auth, reconcile_active_account_with_live_auth, remove_account,
+    save_accounts, set_active_account, switch_to_account, sync_active_account_tokens,
+    touch_account, AUTH_OPERATION_LOCK,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -184,7 +185,11 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
         .position(|account| account.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    if store.active_account_id.as_deref() == Some(account_id) {
+    // Already active only counts when auth.json really holds that account.
+    // Another tool may have changed it; then fall through and rewrite it.
+    if store.active_account_id.as_deref() == Some(account_id)
+        && auth_file_holds_account(&store.accounts[target_index])
+    {
         return Ok(());
     }
 
@@ -232,6 +237,17 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Read-only: does ~/.codex/auth.json exist and hold this account?
+fn auth_file_holds_account(account: &StoredAccount) -> bool {
+    let Ok(Some(auth)) = read_current_auth() else {
+        return false;
+    };
+    match &account.auth_data {
+        AuthData::ApiKey { key } => auth.openai_api_key.as_deref() == Some(key.as_str()),
+        AuthData::ChatGPT { .. } => live_auth_may_hold_account(account, &auth),
+    }
 }
 
 /// Remove an account
@@ -932,5 +948,31 @@ mod backup_protection_tests {
         assert!(validate_backup_password("🦊🦊🦊", true).is_err());
         assert!(validate_backup_password("🦊🦊🦊🦊🦊🦊🦊🦊🦊🦊🦊🦊", true).is_ok());
         assert!(validate_backup_password(&"🦊".repeat(257), true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod active_auth_file_tests {
+    use super::*;
+    use crate::auth::test_support::TestHome;
+
+    #[test]
+    fn active_account_needs_auth_file_to_hold_it() {
+        let _home = TestHome::new();
+        let a = StoredAccount::new_api_key("A".into(), "key-a".into());
+        let b = StoredAccount::new_api_key("B".into(), "key-b".into());
+
+        // auth.json missing: not held, so a switch must rewrite it.
+        assert!(!auth_file_holds_account(&a));
+
+        // auth.json holds B (another tool changed it): A is not held.
+        switch_to_account(&b).unwrap();
+        assert!(!auth_file_holds_account(&a));
+        assert!(auth_file_holds_account(&b));
+
+        // Falling through to the normal switch path rewrites it to A.
+        switch_to_account(&a).unwrap();
+        assert!(auth_file_holds_account(&a));
+        assert!(!auth_file_holds_account(&b));
     }
 }
