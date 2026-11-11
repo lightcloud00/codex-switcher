@@ -45,16 +45,40 @@ pub fn parse_probe_output(stdout: &str) -> Result<serde_json::Value, String> {
     }
 }
 
-/// Fixed argv from the caller, no stdin, stderr dropped, stdout capped. Timeout is its own message; a spawn or
-/// read failure is the generic one. The exit status is ignored: the schema check decides validity.
-pub(super) async fn run_probe(
+/// Why a capture ended without output.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CaptureError {
+    TimedOut,
+    Failed,
+}
+
+/// Kills the child and everything it started. On Unix the child leads its own process group, so a
+/// wrapper script's grandchildren (for example a `credvault exec` still holding the broker) die with it
+/// instead of lingering and making the next check report "broker busy".
+#[cfg(unix)]
+fn kill_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // SAFETY: killpg only signals the group this module created for the child.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
+}
+#[cfg(not(unix))]
+fn kill_tree(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+}
+
+/// Fixed argv from the caller, no stdin, stderr dropped, stdout capped at `cap` bytes. The whole run
+/// (spawn, read, wait) has a hard deadline of `secs`; on expiry the process tree is killed.
+pub(super) async fn run_capture(
     binary: std::path::PathBuf,
     args: &[&str],
     secs: u64,
-    what: &str,
-) -> Result<String, String> {
+    cap: u64,
+) -> Result<(bool, String), CaptureError> {
     use tokio::io::AsyncReadExt;
-    const STDOUT_CAP: u64 = 256 * 1024;
     #[cfg(not(windows))]
     let path = format!(
         "/opt/homebrew/bin:/usr/local/bin:{}",
@@ -66,28 +90,57 @@ pub(super) async fn run_probe(
     // A metadata read must not open a console over the user's desktop.
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let run = async move {
-        let mut child = cmd.spawn().ok()?;
-        let mut out = child.stdout.take()?;
-        let mut buf = Vec::new();
-        (&mut out)
-            .take(STDOUT_CAP)
-            .read_to_end(&mut buf)
-            .await
-            .ok()?;
-        drop(out);
-        child.wait().await.ok()?;
-        Some(String::from_utf8_lossy(&buf).into_owned())
+    let mut child = cmd.spawn().map_err(|_| CaptureError::Failed)?;
+    let Some(mut out) = child.stdout.take() else {
+        kill_tree(&mut child);
+        return Err(CaptureError::Failed);
     };
-    match tokio::time::timeout(std::time::Duration::from_secs(secs), run).await {
-        Err(_) => Err(format!("{what} timed out")),
-        Ok(None) => Err(UNEXPECTED.into()),
-        Ok(Some(stdout)) => Ok(stdout),
+    let mut buf = Vec::new();
+    let run = async {
+        (&mut out).take(cap).read_to_end(&mut buf).await.ok()?;
+        // Closing the pipe lets a chatty child exit on SIGPIPE instead of blocking on a full buffer.
+        drop(out);
+        child.wait().await.ok()
+    };
+    let done = tokio::time::timeout(std::time::Duration::from_secs(secs), run).await;
+    match done {
+        Err(_) => {
+            kill_tree(&mut child);
+            let _ = child.wait().await;
+            Err(CaptureError::TimedOut)
+        }
+        Ok(None) => {
+            kill_tree(&mut child);
+            let _ = child.wait().await;
+            Err(CaptureError::Failed)
+        }
+        Ok(Some(status)) => {
+            // A helper that outlived its parent is cleaned up too.
+            kill_tree(&mut child);
+            Ok((status.success(), String::from_utf8_lossy(&buf).into_owned()))
+        }
+    }
+}
+
+/// Timeout is its own message; a spawn or read failure is the generic one. The exit status is ignored:
+/// the schema check decides validity.
+pub(super) async fn run_probe(
+    binary: std::path::PathBuf,
+    args: &[&str],
+    secs: u64,
+    what: &str,
+) -> Result<String, String> {
+    match run_capture(binary, args, secs, 256 * 1024).await {
+        Ok((_, stdout)) => Ok(stdout),
+        Err(CaptureError::TimedOut) => Err(format!("{what} timed out")),
+        Err(CaptureError::Failed) => Err(UNEXPECTED.into()),
     }
 }
 
@@ -170,6 +223,24 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         let missing = run_probe("/no/such/binary".into(), &[], 10, "API credit check").await;
         assert_eq!(missing.unwrap_err(), UNEXPECTED);
+    }
+
+    /// A wrapper whose backgrounded grandchild holds stdout must still return at the deadline, and
+    /// the grandchild must die with it.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn timeout_kills_grandchildren_too() {
+        let dir = std::env::temp_dir().join(format!("switcher-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let marker = dir.join("alive");
+        let script = format!("(sleep 3; echo x > '{}') & wait", marker.display());
+        let started = std::time::Instant::now();
+        let r = run_capture("/bin/sh".into(), &["-c", &script], 1, 1024).await;
+        assert_eq!(r.unwrap_err(), CaptureError::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(!marker.exists(), "grandchild survived the timeout");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(windows)]

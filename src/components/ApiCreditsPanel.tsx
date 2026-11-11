@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime, openExternalUrl } from "../lib/platform";
+import { CHECK_LIMITS_MS, failedCheckText, withTimeout } from "../lib/withTimeout.ts";
 import { asOfLabel, balanceLine, statusLabel, type ApiCreditRow, type ApiCreditsSnapshot } from "../lib/apiCredits";
 const EMAIL_HINT = "email not set (add it to ~/.config/codex-switcher/api-accounts.json)";
 const BADGE_TONE = { ready: "text-green-700 dark:text-green-300", other: "text-amber-700 dark:text-amber-300" };
@@ -16,16 +17,16 @@ export function ApiCreditsPanel() {
     const current = () => run === latest.current;
     setLoading(true); setError("");
     try {
-      const next = await invokeBackend<ApiCreditsSnapshot>("get_api_credits");
+      const next = await withTimeout(invokeBackend<ApiCreditsSnapshot>("get_api_credits"), CHECK_LIMITS_MS.credits);
       if (current()) setData(next);
-    } catch(e) { if (current()) setError(String(e)); } finally { if (current()) setLoading(false); }
+    } catch(e) { if (current()) setError(failedCheckText(e)); } finally { if (current()) setLoading(false); }
   }
   useEffect(() => { void refresh(); }, []);
   const desktop = isTauriRuntime();
   return <section aria-label="API credits" className="space-y-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">API credits</h2>{desktop && <button onClick={() => void refresh()} disabled={loading} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-50">{loading ? "Checking…" : "Refresh"}</button>}</div>
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-semibold">API credits</h2>{desktop && <button onClick={() => void refresh()} className="rounded-lg border px-3 py-2 text-sm">{loading ? "Checking… (tap to restart)" : "Refresh"}</button>}</div>
     {!desktop && <p className="text-sm text-gray-500">API credits are checked from the desktop app only.</p>}
-    {error && <p role="alert" className="text-red-600 dark:text-red-300">{error}</p>}
+    {error && <p role="alert" className="flex flex-wrap items-center gap-3 text-red-600 dark:text-red-300">{error}<button onClick={() => void refresh()} className="rounded-lg border px-3 py-1.5 text-sm">Retry</button></p>}
     {loading && !data && <p role="status" className="text-sm text-gray-500">Checking providers through CredVault…</p>}
     <div className="grid gap-3 md:grid-cols-2">{data?.providers.map(p => <CreditCard key={p.id} row={p} />)}</div>
   </section>;
