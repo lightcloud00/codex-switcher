@@ -39,3 +39,5 @@ pub use use_next::*;
 pub mod credential_alerts;
 pub mod provider_status;
 pub use provider_status::*;
+pub mod gemini_quota;
+pub use gemini_quota::*;
