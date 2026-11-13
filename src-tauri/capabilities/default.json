@@ -13,6 +13,7 @@
     "core:window:allow-toggle-maximize",
     "opener:default",
     "dialog:default",
-    "process:default"
+    "process:default",
+    "notification:default"
   ]
 }
