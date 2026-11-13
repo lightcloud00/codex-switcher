@@ -1,0 +1,724 @@
+//! Gemini CLI quota, borrowed from CodexBar (docs/gemini.md).
+//!
+//! Uses the Gemini CLI's own local OAuth login (`~/.gemini/oauth_creds.json`) to ask Google's
+//! quota API how much of each model tier is left. No browser cookies. The token is read in this
+//! process for the request only: it is never logged, printed, returned to the UI or written back
+//! (a refreshed access token is thrown away; the CLI refreshes its own file when it next runs).
+//! Errors map to a few fixed phrases, so no response body, header or credential ever reaches the
+//! screen. API-key and Vertex AI logins are reported as unsupported, not read.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+const QUOTA_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
+const LOAD_CODE_ASSIST_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const OVERALL_TIMEOUT: Duration = Duration::from_secs(40);
+const CACHE_TTL: Duration = Duration::from_secs(3 * 60);
+/// A token this close to its expiry is refreshed first.
+const EXPIRY_SKEW_MS: i64 = 60_000;
+const MAX_BODY_BYTES: usize = 256 * 1024;
+/// The CLI bundle is read only to find two public client constants; cap what is scanned.
+const MAX_SCRIPT_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_SCRIPTS: usize = 400;
+
+/// What the stored login file holds. No `Debug`: a stray `{:?}` must never print a token.
+#[derive(Deserialize)]
+struct StoredCreds {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    /// Milliseconds since the epoch.
+    expiry_date: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Ok,
+    /// No Gemini CLI login file on this computer.
+    NotInstalled,
+    /// API-key or Vertex AI login: no OAuth quota to read.
+    UnsupportedAuth,
+    /// Google refused the stored login: run `gemini` once to sign in again.
+    SignInNeeded,
+    /// The login needs a refresh and the CLI's client details could not be found.
+    ClientNotFound,
+    /// Offline, rate limited, or an answer this app does not understand.
+    Unavailable,
+}
+
+impl State {
+    fn message(self) -> &'static str {
+        match self {
+            State::Ok => "",
+            State::NotInstalled => "Gemini CLI is not signed in on this computer.",
+            State::UnsupportedAuth => {
+                "Gemini CLI uses an API key or Vertex AI, which has no quota to show here."
+            }
+            State::SignInNeeded => "Gemini CLI sign-in expired. Run gemini once to sign in again.",
+            State::ClientNotFound => {
+                "Could not refresh the Gemini CLI login. Run gemini once, then refresh."
+            }
+            State::Unavailable => "Could not read Gemini quota right now.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierQuota {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub percent_left: f64,
+    /// RFC 3339 reset time, when Google gave one.
+    pub resets_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiQuota {
+    pub state: State,
+    pub message: &'static str,
+    pub plan: Option<String>,
+    pub tiers: Vec<TierQuota>,
+    pub checked_at: String,
+}
+
+impl GeminiQuota {
+    fn failed(state: State) -> Self {
+        Self {
+            state,
+            message: state.message(),
+            plan: None,
+            tiers: Vec::new(),
+            checked_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pure parsing helpers (all covered by tests)
+// ---------------------------------------------------------------------------------------------
+
+fn parse_creds(text: &str) -> Option<StoredCreds> {
+    serde_json::from_str(text).ok()
+}
+
+/// True while the access token is still usable (with a safety margin).
+fn token_is_fresh(expiry_ms: Option<i64>, now_ms: i64) -> bool {
+    expiry_ms.is_some_and(|expiry| expiry - EXPIRY_SKEW_MS > now_ms)
+}
+
+/// `security.auth.selectedType` of the CLI settings; only API-key and Vertex logins are unsupported.
+fn auth_type_is_unsupported(settings_text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(settings_text) else {
+        return false;
+    };
+    matches!(
+        value["security"]["auth"]["selectedType"].as_str(),
+        Some("gemini-api-key") | Some("vertex-ai")
+    )
+}
+
+/// Finds `NAME = "value"` (or single quotes) in bundled JavaScript. The value is accepted only if
+/// it looks like a plain OAuth client string, never arbitrary code.
+fn extract_constant(js: &str, name: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(found) = js[from..].find(name) {
+        let after = from + found + name.len();
+        from = after;
+        let rest = js[after..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        let body = &rest[1..];
+        let Some(end) = body.find(quote) else {
+            continue;
+        };
+        let value = &body[..end];
+        let plain = !value.is_empty()
+            && value.len() <= 200
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~'));
+        if plain {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    Pro,
+    Flash,
+    FlashLite,
+}
+
+impl Tier {
+    fn of_model(model_id: &str) -> Option<Self> {
+        let m = model_id.to_ascii_lowercase();
+        if m.contains("flash-lite") {
+            Some(Tier::FlashLite)
+        } else if m.contains("flash") {
+            Some(Tier::Flash)
+        } else if m.contains("pro") {
+            Some(Tier::Pro)
+        } else {
+            None
+        }
+    }
+    fn id(self) -> &'static str {
+        match self {
+            Tier::Pro => "pro",
+            Tier::Flash => "flash",
+            Tier::FlashLite => "flash_lite",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Tier::Pro => "Pro",
+            Tier::Flash => "Flash",
+            Tier::FlashLite => "Flash Lite",
+        }
+    }
+}
+
+/// Reads `buckets[]` (`modelId`, `remainingFraction`, `resetTime`): per tier, the lowest fraction
+/// left across its models wins. Missing tiers stay absent; a reported zero stays zero.
+fn parse_quota(body: &Value) -> Vec<TierQuota> {
+    let mut lowest: Vec<(Tier, f64, Option<String>)> = Vec::new();
+    for bucket in body["buckets"].as_array().into_iter().flatten() {
+        let Some(tier) = bucket["modelId"].as_str().and_then(Tier::of_model) else {
+            continue;
+        };
+        let Some(fraction) = bucket["remainingFraction"]
+            .as_f64()
+            .filter(|f| f.is_finite())
+        else {
+            continue;
+        };
+        let fraction = fraction.clamp(0.0, 1.0);
+        let reset = bucket["resetTime"]
+            .as_str()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc).to_rfc3339());
+        match lowest.iter_mut().find(|(t, _, _)| *t == tier) {
+            Some(entry) if fraction < entry.1 => *entry = (tier, fraction, reset),
+            Some(_) => {}
+            None => lowest.push((tier, fraction, reset)),
+        }
+    }
+    [Tier::Pro, Tier::Flash, Tier::FlashLite]
+        .into_iter()
+        .filter_map(|tier| {
+            lowest
+                .iter()
+                .find(|(t, _, _)| *t == tier)
+                .map(|(_, fraction, reset)| TierQuota {
+                    id: tier.id(),
+                    label: tier.label(),
+                    percent_left: (fraction * 1000.0).round() / 10.0,
+                    resets_at: reset.clone(),
+                })
+        })
+        .collect()
+}
+
+/// The paid plan name Google reports, else a label for the tier id. The CLI's `hd` (Workspace)
+/// claim lives in the id token, which this module never reads, so free stays "Free".
+fn parse_plan(load: &Value) -> Option<String> {
+    let clean = |s: &str| {
+        let s: String = s.chars().filter(|c| !c.is_control()).collect();
+        let s = s.trim().to_string();
+        (!s.is_empty() && s.chars().count() <= 40).then_some(s)
+    };
+    if let Some(name) = load["paidTier"]["name"].as_str().and_then(clean) {
+        return Some(name);
+    }
+    match load["currentTier"]["id"].as_str()? {
+        "standard-tier" => Some("Paid".to_string()),
+        "free-tier" => Some("Free".to_string()),
+        "legacy-tier" => Some("Legacy".to_string()),
+        _ => None,
+    }
+}
+
+/// `cloudaicompanionProject` is either a string or an object with an `id`.
+fn parse_project_id(load: &Value) -> Option<String> {
+    let project = &load["cloudaicompanionProject"];
+    project
+        .as_str()
+        .or_else(|| project["id"].as_str())
+        .filter(|id| !id.is_empty() && id.len() <= 200)
+        .map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finding the CLI's public OAuth client (needed only to refresh an expired access token)
+// ---------------------------------------------------------------------------------------------
+
+struct OAuthClient {
+    id: String,
+    secret: String,
+}
+
+fn candidate_scripts(binary: &Path) -> Vec<PathBuf> {
+    let Ok(real) = std::fs::canonicalize(binary) else {
+        return Vec::new();
+    };
+    let mut scripts = Vec::new();
+    for dir in real.ancestors().skip(1).take(6) {
+        let core = dir.join("node_modules/@google/gemini-cli-core/dist/src/code_assist/oauth2.js");
+        if core.is_file() {
+            scripts.push(core);
+        }
+        let bundle = dir.join("bundle");
+        if let Ok(entries) = std::fs::read_dir(&bundle) {
+            scripts.extend(
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "js")),
+            );
+        }
+        if scripts.len() >= MAX_SCRIPTS {
+            break;
+        }
+    }
+    scripts.truncate(MAX_SCRIPTS);
+    scripts
+}
+
+fn client_from_script(path: &Path) -> Option<OAuthClient> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_SCRIPT_BYTES {
+        return None;
+    }
+    let js = std::fs::read_to_string(path).ok()?;
+    Some(OAuthClient {
+        id: extract_constant(&js, "OAUTH_CLIENT_ID")?,
+        secret: extract_constant(&js, "OAUTH_CLIENT_SECRET")?,
+    })
+}
+
+/// Env override, then an `oauth2.js` path override, then the installed CLI package.
+fn find_oauth_client() -> Option<OAuthClient> {
+    if let (Ok(id), Ok(secret)) = (
+        std::env::var("GEMINI_OAUTH_CLIENT_ID"),
+        std::env::var("GEMINI_OAUTH_CLIENT_SECRET"),
+    ) {
+        if !id.is_empty() && !secret.is_empty() {
+            return Some(OAuthClient { id, secret });
+        }
+    }
+    if let Ok(path) = std::env::var("GEMINI_OAUTH2_JS_PATH") {
+        if let Some(client) = client_from_script(Path::new(&path)) {
+            return Some(client);
+        }
+    }
+    let binary = super::provider_access::find_binary("gemini")?;
+    candidate_scripts(&binary)
+        .iter()
+        .find_map(|script| client_from_script(script))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------------------------------
+
+fn http() -> Result<reqwest::Client, State> {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("codex-switcher-gemini-quota")
+        .build()
+        .map_err(|_| State::Unavailable)
+}
+
+async fn read_json(response: reqwest::Response) -> Result<Value, State> {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(State::SignInNeeded);
+    }
+    if !status.is_success() {
+        return Err(State::Unavailable);
+    }
+    if response
+        .content_length()
+        .is_some_and(|len| len as usize > MAX_BODY_BYTES)
+    {
+        return Err(State::Unavailable);
+    }
+    let bytes = response.bytes().await.map_err(|_| State::Unavailable)?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(State::Unavailable);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| State::Unavailable)
+}
+
+/// Exchanges the refresh token for a short-lived access token. The result is used once and dropped.
+async fn refresh_access_token(
+    client: &reqwest::Client,
+    oauth: &OAuthClient,
+    refresh_token: &str,
+) -> Result<String, State> {
+    let response = client
+        .post(TOKEN_URL)
+        .form(&[
+            ("client_id", oauth.id.as_str()),
+            ("client_secret", oauth.secret.as_str()),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await
+        .map_err(|_| State::Unavailable)?;
+    // A refused refresh token (invalid_grant) comes back as 400/401.
+    if matches!(response.status().as_u16(), 400 | 401) {
+        return Err(State::SignInNeeded);
+    }
+    let body = read_json(response).await?;
+    body["access_token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .ok_or(State::Unavailable)
+}
+
+async fn post_json(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    body: Value,
+) -> Result<Value, State> {
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| State::Unavailable)?;
+    read_json(response).await
+}
+
+async fn fetch_quota(home: &Path) -> GeminiQuota {
+    let dir = home.join(".gemini");
+    let Ok(creds_text) = std::fs::read_to_string(dir.join("oauth_creds.json")) else {
+        return GeminiQuota::failed(State::NotInstalled);
+    };
+    if std::fs::read_to_string(dir.join("settings.json"))
+        .is_ok_and(|text| auth_type_is_unsupported(&text))
+    {
+        return GeminiQuota::failed(State::UnsupportedAuth);
+    }
+    let Some(creds) = parse_creds(&creds_text) else {
+        return GeminiQuota::failed(State::NotInstalled);
+    };
+    drop(creds_text);
+    match run(creds).await {
+        Ok(quota) => quota,
+        Err(state) => GeminiQuota::failed(state),
+    }
+}
+
+async fn run(creds: StoredCreds) -> Result<GeminiQuota, State> {
+    let client = http()?;
+    let now_ms = Utc::now().timestamp_millis();
+    let token = match creds.access_token.filter(|t| !t.is_empty()) {
+        Some(token) if token_is_fresh(creds.expiry_date, now_ms) => token,
+        _ => {
+            let refresh = creds
+                .refresh_token
+                .filter(|t| !t.is_empty())
+                .ok_or(State::SignInNeeded)?;
+            let oauth = find_oauth_client().ok_or(State::ClientNotFound)?;
+            refresh_access_token(&client, &oauth, &refresh).await?
+        }
+    };
+
+    let load = post_json(
+        &client,
+        LOAD_CODE_ASSIST_URL,
+        &token,
+        json!({ "metadata": { "ideType": "GEMINI_CLI", "pluginType": "GEMINI" } }),
+    )
+    .await
+    .unwrap_or(Value::Null);
+    let body = match parse_project_id(&load) {
+        Some(project) => json!({ "project": project }),
+        None => json!({}),
+    };
+    let quota = post_json(&client, QUOTA_URL, &token, body).await?;
+    let tiers = parse_quota(&quota);
+    if tiers.is_empty() {
+        return Err(State::Unavailable);
+    }
+    Ok(GeminiQuota {
+        state: State::Ok,
+        message: "",
+        plan: parse_plan(&load),
+        tiers,
+        checked_at: Utc::now().to_rfc3339(),
+    })
+}
+
+static CACHE: LazyLock<Mutex<Option<(Instant, GeminiQuota)>>> = LazyLock::new(|| Mutex::new(None));
+
+fn cached() -> Option<GeminiQuota> {
+    let cache = CACHE.lock().ok()?;
+    cache
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() <= CACHE_TTL)
+        .map(|(_, quota)| quota.clone())
+}
+
+/// Desktop only (the LAN web route never reads local login files). `force` skips the 3-minute cache.
+#[tauri::command]
+pub async fn get_gemini_quota(
+    app: tauri::AppHandle,
+    force: Option<bool>,
+) -> Result<GeminiQuota, String> {
+    if force != Some(true) {
+        if let Some(quota) = cached() {
+            return Ok(quota);
+        }
+    }
+    let Some(home) = dirs::home_dir() else {
+        return Ok(GeminiQuota::failed(State::NotInstalled));
+    };
+    let quota = tokio::time::timeout(OVERALL_TIMEOUT, fetch_quota(&home))
+        .await
+        .unwrap_or_else(|_| GeminiQuota::failed(State::Unavailable));
+    // A refused sign-in starts one local alert; only a good reading ends the episode.
+    let signed_in = match quota.state {
+        State::Ok => "yes",
+        State::SignInNeeded => "no",
+        _ => "unknown",
+    };
+    super::credential_alerts::observe_probe(&app, "gemini", "Gemini CLI", signed_in);
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), quota.clone()));
+    }
+    Ok(quota)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creds_parse_without_needing_every_field() {
+        let c = parse_creds(r#"{"access_token":"a","refresh_token":"r","expiry_date":1700000000000,"id_token":"x"}"#).unwrap();
+        assert_eq!(c.access_token.as_deref(), Some("a"));
+        assert_eq!(c.refresh_token.as_deref(), Some("r"));
+        assert_eq!(c.expiry_date, Some(1_700_000_000_000));
+        let c = parse_creds(r#"{"access_token":"a"}"#).unwrap();
+        assert!(c.refresh_token.is_none() && c.expiry_date.is_none());
+        assert!(parse_creds("not json").is_none());
+    }
+
+    #[test]
+    fn token_freshness_keeps_a_margin() {
+        let now = 1_000_000;
+        assert!(token_is_fresh(Some(now + 120_000), now));
+        assert!(!token_is_fresh(Some(now + 30_000), now));
+        assert!(!token_is_fresh(Some(now - 1), now));
+        assert!(!token_is_fresh(None, now));
+    }
+
+    #[test]
+    fn api_key_and_vertex_logins_are_unsupported() {
+        let s = |t: &str| format!(r#"{{"security":{{"auth":{{"selectedType":"{t}"}}}}}}"#);
+        assert!(auth_type_is_unsupported(&s("gemini-api-key")));
+        assert!(auth_type_is_unsupported(&s("vertex-ai")));
+        assert!(!auth_type_is_unsupported(&s("oauth-personal")));
+        assert!(!auth_type_is_unsupported("{}"));
+        assert!(!auth_type_is_unsupported("garbage"));
+    }
+
+    #[test]
+    fn client_constants_are_read_from_bundled_js_only_when_plain() {
+        let js = r#"var a=1;var OAUTH_CLIENT_ID = "123-abc.apps.example.com";
+            const OAUTH_CLIENT_SECRET = 'GOCSPX-fake_secret~1'; x();"#;
+        assert_eq!(
+            extract_constant(js, "OAUTH_CLIENT_ID").as_deref(),
+            Some("123-abc.apps.example.com")
+        );
+        assert_eq!(
+            extract_constant(js, "OAUTH_CLIENT_SECRET").as_deref(),
+            Some("GOCSPX-fake_secret~1")
+        );
+        // Not an assignment, not plain text, or missing: nothing is returned.
+        assert_eq!(
+            extract_constant("OAUTH_CLIENT_ID;", "OAUTH_CLIENT_ID"),
+            None
+        );
+        assert_eq!(
+            extract_constant(r#"OAUTH_CLIENT_ID = "a b; rm -rf""#, "OAUTH_CLIENT_ID"),
+            None
+        );
+        assert_eq!(extract_constant("nothing here", "OAUTH_CLIENT_ID"), None);
+        // A later real assignment wins over an earlier mention.
+        assert_eq!(
+            extract_constant(
+                r#"log(OAUTH_CLIENT_ID); OAUTH_CLIENT_ID = "good-1""#,
+                "OAUTH_CLIENT_ID"
+            )
+            .as_deref(),
+            Some("good-1")
+        );
+    }
+
+    #[test]
+    fn models_map_to_three_tiers() {
+        assert_eq!(Tier::of_model("gemini-2.5-pro"), Some(Tier::Pro));
+        assert_eq!(Tier::of_model("gemini-2.5-flash"), Some(Tier::Flash));
+        assert_eq!(
+            Tier::of_model("gemini-2.5-flash-lite"),
+            Some(Tier::FlashLite)
+        );
+        assert_eq!(Tier::of_model("embedding-001"), None);
+    }
+
+    #[test]
+    fn quota_takes_the_lowest_fraction_per_tier() {
+        let body = json!({"buckets":[
+            {"modelId":"gemini-2.5-pro","remainingFraction":0.8,"resetTime":"2026-11-13T05:00:00Z"},
+            {"modelId":"gemini-3-pro-preview","remainingFraction":0.25,"resetTime":"2026-11-13T07:30:00Z"},
+            {"modelId":"gemini-2.5-flash","remainingFraction":0.0,"resetTime":"2026-11-13T09:00:00Z"},
+            {"modelId":"gemini-2.5-flash-lite","remainingFraction":1.5},
+            {"modelId":"embedding-001","remainingFraction":0.1},
+            {"modelId":"gemini-2.5-pro"},
+            {"modelId":"gemini-2.5-pro","remainingFraction":"bad"}
+        ]});
+        let tiers = parse_quota(&body);
+        assert_eq!(
+            tiers
+                .iter()
+                .map(|t| (t.id, t.percent_left))
+                .collect::<Vec<_>>(),
+            vec![("pro", 25.0), ("flash", 0.0), ("flash_lite", 100.0)]
+        );
+        assert_eq!(
+            tiers[0].resets_at.as_deref(),
+            Some("2026-11-13T07:30:00+00:00")
+        );
+        assert_eq!(tiers[2].resets_at, None);
+    }
+
+    #[test]
+    fn empty_or_odd_quota_bodies_give_no_tiers() {
+        assert!(parse_quota(&json!({})).is_empty());
+        assert!(parse_quota(&json!({"buckets": "x"})).is_empty());
+        assert!(parse_quota(&json!({"buckets": [{"modelId": 5}]})).is_empty());
+    }
+
+    #[test]
+    fn plan_prefers_the_paid_name_then_the_tier() {
+        assert_eq!(
+            parse_plan(
+                &json!({"paidTier":{"name":"Google AI Pro"},"currentTier":{"id":"free-tier"}})
+            )
+            .as_deref(),
+            Some("Google AI Pro")
+        );
+        assert_eq!(
+            parse_plan(&json!({"currentTier":{"id":"standard-tier"}})).as_deref(),
+            Some("Paid")
+        );
+        assert_eq!(
+            parse_plan(&json!({"currentTier":{"id":"free-tier"}})).as_deref(),
+            Some("Free")
+        );
+        assert_eq!(
+            parse_plan(&json!({"currentTier":{"id":"legacy-tier"}})).as_deref(),
+            Some("Legacy")
+        );
+        assert_eq!(parse_plan(&json!({"currentTier":{"id":"mystery"}})), None);
+        assert_eq!(parse_plan(&json!({})), None);
+        let long = "x".repeat(60);
+        assert_eq!(parse_plan(&json!({"paidTier":{"name": long}})), None);
+    }
+
+    #[test]
+    fn project_id_is_a_string_or_an_object() {
+        assert_eq!(
+            parse_project_id(&json!({"cloudaicompanionProject":"p-1"})).as_deref(),
+            Some("p-1")
+        );
+        assert_eq!(
+            parse_project_id(&json!({"cloudaicompanionProject":{"id":"p-2"}})).as_deref(),
+            Some("p-2")
+        );
+        assert_eq!(
+            parse_project_id(&json!({"cloudaicompanionProject":""})),
+            None
+        );
+        assert_eq!(parse_project_id(&json!({})), None);
+    }
+
+    #[test]
+    fn failed_readings_carry_a_fixed_message_and_no_data() {
+        for state in [
+            State::NotInstalled,
+            State::UnsupportedAuth,
+            State::SignInNeeded,
+            State::ClientNotFound,
+            State::Unavailable,
+        ] {
+            let q = GeminiQuota::failed(state);
+            assert_eq!(q.state, state);
+            assert!(!q.message.is_empty());
+            assert!(q.tiers.is_empty() && q.plan.is_none());
+        }
+        assert_eq!(State::Ok.message(), "");
+    }
+
+    /// Reads from a fake home, so no real login file is ever touched.
+    #[tokio::test]
+    async fn missing_login_file_means_not_installed() {
+        let dir = std::env::temp_dir().join(format!("gemini-quota-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let q = fetch_quota(&dir).await;
+        assert_eq!(q.state, State::NotInstalled);
+        std::fs::create_dir_all(dir.join(".gemini")).unwrap();
+        std::fs::write(
+            dir.join(".gemini/oauth_creds.json"),
+            r#"{"access_token":"fake"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".gemini/settings.json"),
+            r#"{"security":{"auth":{"selectedType":"vertex-ai"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(fetch_quota(&dir).await.state, State::UnsupportedAuth);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn expired_login_without_a_refresh_token_needs_sign_in() {
+        let dir = std::env::temp_dir().join(format!("gemini-quota-test2-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".gemini")).unwrap();
+        std::fs::write(
+            dir.join(".gemini/oauth_creds.json"),
+            r#"{"access_token":"fake","expiry_date":1}"#,
+        )
+        .unwrap();
+        assert_eq!(fetch_quota(&dir).await.state, State::SignInNeeded);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
