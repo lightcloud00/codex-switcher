@@ -163,6 +163,13 @@ pub fn alert_text(label: &str) -> (String, String) {
 fn deliver<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
     use tauri_plugin_notification::{NotificationExt, PermissionState};
 
+    // Off in Settings: nothing is shown, and the slot is given back so turning it on alerts again.
+    if !crate::auth::load_app_settings()
+        .map(|s| s.sign_in_alerts_enabled)
+        .unwrap_or(true)
+    {
+        return false;
+    }
     let notification = app.notification();
     let permitted = match notification.permission_state() {
         Ok(PermissionState::Granted) => true,

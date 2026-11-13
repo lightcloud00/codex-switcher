@@ -385,7 +385,11 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     }
 
     // Outage badges: one disabled line per provider that is degraded right now (public status pages).
-    let outage_lines = crate::commands::provider_status::menu_lines();
+    let outage_lines = if crate::commands::provider_status::enabled() {
+        crate::commands::provider_status::menu_lines()
+    } else {
+        Vec::new()
+    };
     if !outage_lines.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
         for (index, line) in outage_lines.iter().enumerate() {
@@ -847,8 +851,10 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
 /// badge appears or clears. Never touches accounts, tokens or cookies.
 fn poll_provider_status<R: Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || loop {
-        if tauri::async_runtime::block_on(crate::commands::provider_status::refresh_all()) {
-            refresh_menu(&app);
+        if crate::commands::provider_status::enabled() {
+            if tauri::async_runtime::block_on(crate::commands::provider_status::refresh_all()) {
+                refresh_menu(&app);
+            }
         }
         std::thread::sleep(crate::commands::provider_status::POLL_INTERVAL);
     });

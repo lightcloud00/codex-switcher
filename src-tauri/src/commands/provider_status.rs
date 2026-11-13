@@ -255,9 +255,63 @@ fn cache_is_fresh() -> bool {
     })
 }
 
+/// The user's switch (Settings). A settings file that cannot be read counts as on.
+pub fn enabled() -> bool {
+    crate::auth::load_app_settings()
+        .map(|s| s.provider_status_enabled)
+        .unwrap_or(true)
+}
+
+/// Applies one Settings switch to the settings value; unknown names are refused.
+pub fn apply_monitoring_setting(
+    settings: &mut crate::types::AppSettings,
+    setting: &str,
+    on: bool,
+) -> Result<(), String> {
+    match setting {
+        "provider_status" => settings.provider_status_enabled = on,
+        "sign_in_alerts" => settings.sign_in_alerts_enabled = on,
+        _ => return Err("Unknown setting".to_string()),
+    }
+    Ok(())
+}
+
+/// Settings: turn outage badges (`provider_status`) or sign-in alerts (`sign_in_alerts`) on or off.
+#[tauri::command]
+pub fn set_monitoring_setting(
+    app: tauri::AppHandle,
+    setting: String,
+    enabled: bool,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let mut settings = crate::auth::load_app_settings().map_err(|e| e.to_string())?;
+    apply_monitoring_setting(&mut settings, &setting, enabled)?;
+    crate::auth::save_app_settings(&settings).map_err(|e| e.to_string())?;
+    if setting == "provider_status" {
+        if !enabled {
+            clear();
+        }
+        #[cfg(desktop)]
+        crate::tray::refresh(&app);
+    }
+    let _ = app.emit("app-settings-changed", ());
+    Ok(())
+}
+
+/// Forgets every answer, so turning the switch off removes the badges at once.
+pub fn clear() {
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.clear();
+    }
+}
+
 /// Answers the popup: reuses a recent answer, otherwise checks the five pages first.
+/// Nothing is fetched and nothing is returned while the setting is off.
 #[tauri::command]
 pub async fn get_provider_status() -> Result<Vec<ProviderStatus>, String> {
+    if !enabled() {
+        return Ok(Vec::new());
+    }
     if !cache_is_fresh() {
         refresh_all().await;
     }
@@ -270,6 +324,31 @@ mod tests {
 
     const SAMPLE: &str = r#"{"page":{"id":"x","name":"OpenAI","url":"https://status.openai.com/"},
         "status":{"description":"Partial System Degradation","indicator":"minor"}}"#;
+
+    #[test]
+    fn settings_switches_apply_by_name_and_refuse_unknown_names() {
+        let mut s = crate::types::AppSettings::default();
+        assert!(s.provider_status_enabled && s.sign_in_alerts_enabled);
+        apply_monitoring_setting(&mut s, "provider_status", false).unwrap();
+        assert!(!s.provider_status_enabled && s.sign_in_alerts_enabled);
+        apply_monitoring_setting(&mut s, "sign_in_alerts", false).unwrap();
+        assert!(!s.sign_in_alerts_enabled);
+        assert!(apply_monitoring_setting(&mut s, "tray_display_mode", true).is_err());
+    }
+
+    #[test]
+    fn old_settings_files_default_both_switches_on_and_new_ones_round_trip() {
+        let old: crate::types::AppSettings =
+            serde_json::from_str(r#"{"tray_display_mode":"hidden"}"#).unwrap();
+        assert!(old.provider_status_enabled && old.sign_in_alerts_enabled);
+        let off: crate::types::AppSettings = serde_json::from_str(
+            r#"{"provider_status_enabled":false,"sign_in_alerts_enabled":false}"#,
+        )
+        .unwrap();
+        assert!(!off.provider_status_enabled && !off.sign_in_alerts_enabled);
+        let text = serde_json::to_string(&off).unwrap();
+        assert!(text.contains(r#""provider_status_enabled":false"#));
+    }
 
     #[test]
     fn parses_real_statuspage_shape() {
