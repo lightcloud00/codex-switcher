@@ -247,7 +247,7 @@ When a login stops working, the app shows one local notification for that provid
 
 - One alert per provider (or per Claude seat) per failure episode. The episode ends when a fresh, successful check for the account that failed comes back, so repeated refreshes do not repeat the alert. A busy host, a rate limit or a network error never raises one.
 - Codex accounts alert on the first failing check that says the login is bad (a 401, `invalid_grant`, an expired or reused token), even if the app never saw that account working. The other sources alert only after they were seen working in this run, so one that was already signed out when the app opened stays silent.
-- It covers Codex accounts; Claude seats on this Mac, as reported by `claude-usage` (a seat must be confirmed signed in by two separate checks first; remote seats such as Windows or WSL and archived seats never alert, because `claude-usage` only reports sign-in state for local seats); the Grok, Cursor and CredVault sign-in checks on the Providers view; and the Gemini CLI quota check.
+- It covers Codex accounts; Claude seats on this Mac, as reported by `claude-usage` (a seat must be confirmed signed in by two checks at least 15 minutes apart first, because `claude-usage` answers from cached probes; remote seats such as Windows or WSL and archived seats never alert, because `claude-usage` only reports sign-in state for local seats); the Grok, Cursor and CredVault sign-in checks on the Providers view; and the Gemini CLI quota check.
 - Episodes live in memory, so restarting the app starts clean.
 - On by default. Turn it off with **Settings → Notify me when a sign-in expires**.
 
