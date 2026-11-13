@@ -7,6 +7,9 @@ import {
   THEME_CHANGED_EVENT,
   type ThemeMode,
 } from "./lib/theme";
+import { needsRelogin } from "./lib/accountAuth";
+import { formatResetCountdown } from "./lib/resetCountdown";
+import { statusBadges, type ProviderStatus } from "./lib/providerStatus";
 import {
   AUTO_WARMUP_ALL_CHANGED_EVENT,
   readAutoWarmupAllEnabled,
@@ -14,6 +17,8 @@ import {
 } from "./lib/autoWarmup";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
+// Countdowns redraw this often while the popup is open; status pages are re-read when it opens.
+const COUNTDOWN_TICK_MS = 30_000;
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 // Mirrors the backend guard message in process.rs (ensure_codex_not_running).
@@ -54,20 +59,6 @@ function remainingTone(remaining: number): { text: string; bar: string; dot: str
     bar: "bg-emerald-500",
     dot: "bg-emerald-500",
   };
-}
-
-// "time until reset" label, e.g. "4h 55m" / "4d 18h" / "now".
-function formatResetAt(resetAt: number | null | undefined): string | null {
-  if (!resetAt) return null;
-
-  const diff = resetAt - Math.floor(Date.now() / 1000);
-  if (diff <= 0) return "now";
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86_400) {
-    return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
-  }
-  return `${Math.floor(diff / 86_400)}d ${Math.floor((diff % 86_400) / 3600)}h`;
 }
 
 function formatExactResetTime(
@@ -124,6 +115,12 @@ function retainUsageForAccounts(
   );
 }
 
+const BADGE_TONES = {
+  warn: "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300",
+  bad: "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300",
+  info: "bg-sky-50 text-sky-700 dark:bg-sky-900/20 dark:text-sky-300",
+} as const;
+
 function TrayMenu() {
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,6 +131,8 @@ function TrayMenu() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(readAutoWarmupAllEnabled);
   const [dockDisplayMode, setDockDisplayMode] = useState<DockDisplayMode | null>(null);
+  const [providerStatuses, setProviderStatuses] = useState<ProviderStatus[]>([]);
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
   const loadUsage = useCallback(async (list: AccountInfo[]) => {
@@ -218,8 +217,19 @@ function TrayMenu() {
     }
   }, []);
 
+  // Public status pages only; a failed check leaves the last answer (the backend drops stale ones).
+  const loadProviderStatus = useCallback(async () => {
+    try {
+      setProviderStatuses(await invokeBackend<ProviderStatus[]>("get_provider_status"));
+    } catch {
+      setProviderStatuses([]);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
+      setNowSeconds(Math.floor(Date.now() / 1000));
+      void loadProviderStatus();
       void loadDockDisplayMode();
       const list = await invokeBackend<AccountInfo[]>("list_accounts");
       setAccounts(list);
@@ -232,7 +242,7 @@ function TrayMenu() {
     } finally {
       setLoading(false);
     }
-  }, [loadActiveStats, loadDockDisplayMode, loadUsage]);
+  }, [loadActiveStats, loadDockDisplayMode, loadProviderStatus, loadUsage]);
 
   // Manual refresh: re-pull accounts and actively fetch fresh usage once.
   const handleRefresh = useCallback(async () => {
@@ -281,6 +291,15 @@ function TrayMenu() {
     },
     [dockDisplayMode]
   );
+
+  // Keep the "Resets in ..." countdowns moving while the popup stays open.
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setNowSeconds(Math.floor(Date.now() / 1000)),
+      COUNTDOWN_TICK_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Reload when the tray is reopened or accounts change elsewhere.
   useEffect(() => {
@@ -353,6 +372,8 @@ function TrayMenu() {
     }
   }, []);
 
+  const badges = statusBadges(providerStatuses);
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden rounded-xl border border-gray-200 bg-white text-gray-900 shadow-2xl dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100">
       <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800">
@@ -387,6 +408,24 @@ function TrayMenu() {
           </span>
         </button>
       </div>
+
+      {badges.length > 0 && (
+        <div
+          role="status"
+          aria-label="Provider outages"
+          className="flex flex-wrap gap-1 border-b border-gray-100 px-3 py-1.5 dark:border-gray-800"
+        >
+          {badges.map((badge) => (
+            <span
+              key={badge.id}
+              title={badge.title}
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${BADGE_TONES[badge.tone]}`}
+            >
+              {badge.tone === "info" ? "🛠" : "⚠"} {badge.label} {badge.word}
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-1.5">
         {loading ? (
@@ -464,7 +503,7 @@ function TrayMenu() {
                       {windows.map((w) => {
                         const remaining = Math.max(0, 100 - w.used);
                         const tone = remainingTone(remaining);
-                        const reset = formatResetAt(w.resetAt);
+                        const reset = formatResetCountdown(w.resetAt, nowSeconds);
                         const exactReset = formatExactResetTime(w.resetAt, w.label === "Weekly");
                         return (
                           <span key={w.label} className="block">
@@ -499,7 +538,7 @@ function TrayMenu() {
                     </span>
                   ) : usage?.error ? (
                     <span className="block truncate text-xs text-red-500 dark:text-red-400">
-                      Usage unavailable
+                      {needsRelogin(usage.error) ? "Sign in again needed" : "Usage unavailable"}
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">

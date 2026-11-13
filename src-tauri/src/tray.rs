@@ -36,6 +36,7 @@ const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
 const ACCOUNT_ITEM_PREFIX: &str = "account:";
 const USE_NEXT_ITEM_PREFIX: &str = "use-next:";
 const USE_NEXT_DISABLED_ITEM_ID: &str = "use-next";
+const PROVIDER_STATUS_ITEM_PREFIX: &str = "provider-status:";
 const OPEN_ITEM_ID: &str = "open";
 const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
@@ -101,6 +102,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     watch_system_theme(app.clone());
     poll_active_account_usage(app.clone());
     poll_account_metadata(app.clone());
+    poll_provider_status(app.clone());
     Ok(())
 }
 
@@ -379,6 +381,22 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
                     .checked(store.active_account_id.as_deref() == Some(&account.id))
                     .build(app)?;
             menu.append(&item)?;
+        }
+    }
+
+    // Outage badges: one disabled line per provider that is degraded right now (public status pages).
+    let outage_lines = crate::commands::provider_status::menu_lines();
+    if !outage_lines.is_empty() {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        for (index, line) in outage_lines.iter().enumerate() {
+            menu.append(
+                &MenuItemBuilder::with_id(
+                    format!("{PROVIDER_STATUS_ITEM_PREFIX}{index}"),
+                    menu_label(line),
+                )
+                .enabled(false)
+                .build(app)?,
+            )?;
         }
     }
 
@@ -686,7 +704,7 @@ fn remaining_percent_label(used_percent: Option<f64>) -> Option<String> {
     Some(format!("{:.0}%", (100.0 - used_percent).clamp(0.0, 100.0)))
 }
 
-// "  —  S:73% W:51%" remaining-quota suffix for a menu label, or "" when unknown.
+// "  —  5h:73% ↻2h 5m 7d:51% ↻3d 4h" remaining-quota suffix for a menu label, or "" when unknown.
 fn usage_suffix(account_id: &str) -> String {
     let Ok(cache) = TRAY_USAGE.lock() else {
         return String::new();
@@ -698,17 +716,29 @@ fn usage_suffix(account_id: &str) -> String {
         return String::new();
     }
 
+    let now = chrono::Utc::now().timestamp();
     let mut parts = Vec::new();
     if let Some(remaining) = session_remaining_title(usage.primary_used_percent, false) {
         let label =
             window_duration_label(usage.primary_window_minutes).unwrap_or_else(|| "S".to_string());
-        parts.push(format!("{label}:{remaining}"));
+        parts.push(window_part(
+            &label,
+            &remaining,
+            usage.primary_resets_at,
+            now,
+        ));
     }
     if let Some(used) = usage.secondary_used_percent {
         if used.is_finite() {
             let label = window_duration_label(usage.secondary_window_minutes)
                 .unwrap_or_else(|| "W".to_string());
-            parts.push(format!("{label}:{:.0}%", (100.0 - used).clamp(0.0, 100.0)));
+            let remaining = format!("{:.0}%", (100.0 - used).clamp(0.0, 100.0));
+            parts.push(window_part(
+                &label,
+                &remaining,
+                usage.secondary_resets_at,
+                now,
+            ));
         }
     }
 
@@ -717,6 +747,31 @@ fn usage_suffix(account_id: &str) -> String {
     } else {
         format!("  —  {}", parts.join(" "))
     }
+}
+
+/// "5h:73% ↻2h 5m": the window, what is left, and the time until it resets (when known).
+fn window_part(label: &str, remaining: &str, resets_at: Option<i64>, now: i64) -> String {
+    match reset_countdown(resets_at, now) {
+        Some(left) => format!("{label}:{remaining} ↻{left}"),
+        None => format!("{label}:{remaining}"),
+    }
+}
+
+/// Time left until a usage window resets, e.g. "45s", "12m", "4h 55m", "4d 18h" or "now".
+/// None when the reset time is unknown. Matches the popup's wording in src/lib/resetCountdown.ts.
+fn reset_countdown(resets_at: Option<i64>, now: i64) -> Option<String> {
+    let diff = resets_at.filter(|at| *at > 0)? - now;
+    Some(if diff <= 0 {
+        "now".to_string()
+    } else if diff < 60 {
+        format!("{diff}s")
+    } else if diff < 3_600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86_400 {
+        format!("{}h {}m", diff / 3_600, (diff % 3_600) / 60)
+    } else {
+        format!("{}d {}h", diff / 86_400, (diff % 86_400) / 3_600)
+    })
 }
 
 fn account_menu_id(account_id: &str) -> String {
@@ -774,7 +829,10 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
             .and_then(|id| get_account(&id).ok().flatten());
 
         if let Some(account) = account {
-            match tauri::async_runtime::block_on(get_account_usage(&account)) {
+            let result = tauri::async_runtime::block_on(get_account_usage(&account))
+                .map_err(|error| error.to_string());
+            crate::commands::credential_alerts::observe_codex_usage(&app, &account.id, &result);
+            match result {
                 // Keep the last known title on transient fetch errors.
                 Ok(usage) => ingest_usage(&app, vec![usage]),
                 Err(error) => eprintln!("Failed to poll usage for tray title: {error}"),
@@ -782,6 +840,17 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
         }
 
         std::thread::sleep(Duration::from_secs(60));
+    });
+}
+
+/// Check the public provider status pages every few minutes and redraw the native menu when a
+/// badge appears or clears. Never touches accounts, tokens or cookies.
+fn poll_provider_status<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || loop {
+        if tauri::async_runtime::block_on(crate::commands::provider_status::refresh_all()) {
+            refresh_menu(&app);
+        }
+        std::thread::sleep(crate::commands::provider_status::POLL_INTERVAL);
     });
 }
 
@@ -930,6 +999,41 @@ mod tests {
         );
         assert_eq!(usage_title(Some(27.0), Some(5 * 60), None, None), "5h:73%");
         assert_eq!(usage_title(None, None, None, None), "H:-- W:--");
+    }
+
+    #[test]
+    fn reset_countdown_matches_the_popup_wording() {
+        let now = 1_000_000;
+        assert_eq!(reset_countdown(None, now), None);
+        assert_eq!(reset_countdown(Some(0), now), None);
+        assert_eq!(reset_countdown(Some(now - 5), now), Some("now".to_string()));
+        assert_eq!(reset_countdown(Some(now), now), Some("now".to_string()));
+        assert_eq!(
+            reset_countdown(Some(now + 45), now),
+            Some("45s".to_string())
+        );
+        assert_eq!(
+            reset_countdown(Some(now + 12 * 60 + 30), now),
+            Some("12m".to_string())
+        );
+        assert_eq!(
+            reset_countdown(Some(now + 4 * 3_600 + 55 * 60), now),
+            Some("4h 55m".to_string())
+        );
+        assert_eq!(
+            reset_countdown(Some(now + 4 * 86_400 + 18 * 3_600), now),
+            Some("4d 18h".to_string())
+        );
+    }
+
+    #[test]
+    fn window_part_adds_the_countdown_only_when_known() {
+        let now = 1_000_000;
+        assert_eq!(
+            window_part("5h", "73%", Some(now + 7_500), now),
+            "5h:73% ↻2h 5m"
+        );
+        assert_eq!(window_part("5h", "73%", None, now), "5h:73%");
     }
 
     #[test]
