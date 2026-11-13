@@ -285,14 +285,21 @@ fn candidate_scripts(binary: &Path) -> Vec<PathBuf> {
         if core.is_file() {
             scripts.push(core);
         }
-        let bundle = dir.join("bundle");
-        if let Ok(entries) = std::fs::read_dir(&bundle) {
-            scripts.extend(
-                entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|x| x == "js")),
-            );
+        // `<dir>/bundle` is the package root itself (a symlinked bin, e.g. macOS and Linux);
+        // `<dir>/node_modules/@google/gemini-cli/bundle` is a global install next to a bin shim
+        // that is a real file (Windows `%APPDATA%\npm\gemini.cmd`).
+        for bundle in [
+            dir.join("bundle"),
+            dir.join("node_modules/@google/gemini-cli/bundle"),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(&bundle) {
+                scripts.extend(
+                    entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|x| x == "js")),
+                );
+            }
         }
         if scripts.len() >= MAX_SCRIPTS {
             break;
@@ -348,6 +355,30 @@ fn http() -> Result<reqwest::Client, State> {
         .map_err(|_| State::Unavailable)
 }
 
+/// The state a refused token exchange means: `invalid_grant` is a lost sign-in, anything else is not.
+fn refresh_error_state(body: &Value) -> State {
+    if body["error"].as_str() == Some("invalid_grant") {
+        State::SignInNeeded
+    } else {
+        State::Unavailable
+    }
+}
+
+/// Like `read_json` but for an error status: size-capped, and never maps the status itself.
+async fn read_body_json(response: reqwest::Response) -> Result<Value, State> {
+    if response
+        .content_length()
+        .is_some_and(|len| len as usize > MAX_BODY_BYTES)
+    {
+        return Err(State::Unavailable);
+    }
+    let bytes = response.bytes().await.map_err(|_| State::Unavailable)?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(State::Unavailable);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| State::Unavailable)
+}
+
 async fn read_json(response: reqwest::Response) -> Result<Value, State> {
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -386,9 +417,11 @@ async fn refresh_access_token(
         .send()
         .await
         .map_err(|_| State::Unavailable)?;
-    // A refused refresh token (invalid_grant) comes back as 400/401.
+    // Only `invalid_grant` means the login itself is gone. Other 400/401 answers (invalid_client
+    // from a stale or mismatched client id/secret) are not the user's sign-in.
     if matches!(response.status().as_u16(), 400 | 401) {
-        return Err(State::SignInNeeded);
+        let body = read_body_json(response).await.unwrap_or(Value::Null);
+        return Err(refresh_error_state(&body));
     }
     let body = read_json(response).await?;
     body["access_token"]
@@ -437,22 +470,29 @@ async fn fetch_quota(home: &Path) -> GeminiQuota {
 async fn run(creds: StoredCreds) -> Result<GeminiQuota, State> {
     let client = http()?;
     let now_ms = Utc::now().timestamp_millis();
-    let token = match creds.access_token.filter(|t| !t.is_empty()) {
-        Some(token) if token_is_fresh(creds.expiry_date, now_ms) => token,
-        _ => {
-            let refresh = creds
-                .refresh_token
-                .filter(|t| !t.is_empty())
-                .ok_or(State::SignInNeeded)?;
-            let oauth = find_oauth_client().ok_or(State::ClientNotFound)?;
-            refresh_access_token(&client, &oauth, &refresh).await?
+    let refresh_token = creds.refresh_token.filter(|t| !t.is_empty());
+    let stored = creds
+        .access_token
+        .filter(|t| !t.is_empty() && token_is_fresh(creds.expiry_date, now_ms));
+    if let Some(token) = stored {
+        match read_quota(&client, &token).await {
+            // A stored token Google refuses (clock skew, revoked access token) gets one refresh
+            // before the sign-in is called lost.
+            Err(State::SignInNeeded) if refresh_token.is_some() => {}
+            other => return other,
         }
-    };
+    }
+    let refresh = refresh_token.ok_or(State::SignInNeeded)?;
+    let oauth = find_oauth_client().ok_or(State::ClientNotFound)?;
+    let token = refresh_access_token(&client, &oauth, &refresh).await?;
+    read_quota(&client, &token).await
+}
 
+async fn read_quota(client: &reqwest::Client, token: &str) -> Result<GeminiQuota, State> {
     let load = post_json(
-        &client,
+        client,
         LOAD_CODE_ASSIST_URL,
-        &token,
+        token,
         json!({ "metadata": { "ideType": "GEMINI_CLI", "pluginType": "GEMINI" } }),
     )
     .await
@@ -461,7 +501,7 @@ async fn run(creds: StoredCreds) -> Result<GeminiQuota, State> {
         Some(project) => json!({ "project": project }),
         None => json!({}),
     };
-    let quota = post_json(&client, QUOTA_URL, &token, body).await?;
+    let quota = post_json(client, QUOTA_URL, token, body).await?;
     let tiers = parse_quota(&quota);
     if tiers.is_empty() {
         return Err(State::Unavailable);
@@ -580,6 +620,46 @@ mod tests {
             .as_deref(),
             Some("good-1")
         );
+    }
+
+    #[test]
+    fn only_invalid_grant_means_the_sign_in_is_lost() {
+        assert_eq!(
+            refresh_error_state(&json!({"error":"invalid_grant"})),
+            State::SignInNeeded
+        );
+        assert_eq!(
+            refresh_error_state(&json!({"error":"invalid_client"})),
+            State::Unavailable
+        );
+        assert_eq!(refresh_error_state(&Value::Null), State::Unavailable);
+        assert_eq!(refresh_error_state(&json!({})), State::Unavailable);
+    }
+
+    #[test]
+    fn windows_npm_global_layout_is_searched() {
+        let root = std::env::temp_dir().join(format!("gemini-layout-{}", std::process::id()));
+        let bundle = root.join("npm/node_modules/@google/gemini-cli/bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(
+            bundle.join("chunk-1.js"),
+            r#"var OAUTH_CLIENT_ID = "id-1"; var OAUTH_CLIENT_SECRET = "secret-1";"#,
+        )
+        .unwrap();
+        // A real-file shim next to node_modules, like %APPDATA%\npm\gemini.cmd.
+        let shim = root.join("npm/gemini.cmd");
+        std::fs::write(&shim, "@echo off").unwrap();
+        let scripts = candidate_scripts(&shim);
+        assert!(
+            scripts.iter().any(|p| p.ends_with("chunk-1.js")),
+            "{scripts:?}"
+        );
+        let client = scripts.iter().find_map(|p| client_from_script(p)).unwrap();
+        assert_eq!(
+            (client.id.as_str(), client.secret.as_str()),
+            ("id-1", "secret-1")
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
