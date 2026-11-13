@@ -104,8 +104,51 @@ pub async fn fetch_claude_usage() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn get_claude_usage() -> Result<Value, String> {
-    fetch_claude_usage().await
+pub async fn get_claude_usage(app: tauri::AppHandle) -> Result<Value, String> {
+    let summary = fetch_claude_usage().await?;
+    // Desktop only (the LAN web route calls fetch_claude_usage directly): one local alert when a
+    // seat that was signed in loses its login. Archived seats stay silent.
+    super::credential_alerts::observe_claude_usage(&app, &summary, hidden_usage_labels().as_ref());
+    Ok(summary)
+}
+
+/// Every usage label (claude-usage account name) of the archived seats, so they never raise alerts.
+/// `None` when the archived list (or, with seats archived, the registry) cannot be read: the caller
+/// then skips alerting rather than assume nothing is archived. A registry that simply is not there
+/// is normal and only means no registry-only seats.
+fn hidden_usage_labels() -> Option<std::collections::HashSet<String>> {
+    let hidden = read_hidden_seat_ids().ok()?;
+    if hidden.is_empty() {
+        return Some(std::collections::HashSet::new());
+    }
+    let registry = match read_seat_registry() {
+        Ok(seats) => seats,
+        Err(error) if error.starts_with("seat registry not found") => Vec::new(),
+        Err(_) => return None,
+    };
+    Some(labels_of_hidden_seats(&hidden, &registry, &seat_table()))
+}
+
+fn labels_of_hidden_seats(
+    hidden: &[String],
+    registry: &[RegistrySeat],
+    table: &SeatTable,
+) -> std::collections::HashSet<String> {
+    let mut labels = std::collections::HashSet::new();
+    for id in hidden {
+        let usage_account = registry
+            .iter()
+            .find(|seat| &seat.id == id)
+            .and_then(|seat| seat.usage_account.as_deref());
+        let fallback = table
+            .seats
+            .iter()
+            .find(|known| &known.id == id)
+            .map(|known| known.usage_labels.as_slice())
+            .unwrap_or(&[]);
+        labels.extend(seat_labels(id, usage_account, fallback));
+    }
+    labels
 }
 
 // ---- Claude seats -------------------------------------------------------------------------------
@@ -616,6 +659,25 @@ mod tests {
 
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn an_archived_seat_hides_every_usage_label_it_reports_under() {
+        let registry = vec![RegistrySeat {
+            id: "claude-mac-gustavo".to_string(),
+            host: None,
+            plan: None,
+            usage_account: Some("mac-gustavo-max".to_string()),
+        }];
+        let labels = labels_of_hidden_seats(
+            &["claude-mac-gustavo".to_string(), "claude-extra".to_string()],
+            &registry,
+            &seat_table(),
+        );
+        assert!(labels.contains("claude-mac-gustavo"));
+        assert!(labels.contains("mac-gustavo-max"));
+        assert!(labels.contains("claude-extra"));
+        assert!(!labels.contains("mac-main-max"));
+    }
 
     const FIXTURE: &str = include_str!("../../../tests/fixtures/claude-usage-summary.json");
     const REGISTRY_FIXTURE: &str =
