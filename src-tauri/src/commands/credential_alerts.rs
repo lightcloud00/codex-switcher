@@ -104,7 +104,20 @@ impl Episodes {
         }
     }
 
-    /// A delivery that failed or was refused gives its reservation back so a later check retries.
+    /// Forgets failing accounts that no longer exist (deleted or replaced), so a removed broken
+    /// account cannot keep the episode open and silence every later alert.
+    pub fn prune(&mut self, provider: &str, live_accounts: &HashSet<String>) {
+        if let Some(accounts) = self.failing.get_mut(provider) {
+            accounts.retain(|account| live_accounts.contains(account));
+            if accounts.is_empty() {
+                self.failing.remove(provider);
+                self.alerted.remove(provider);
+            }
+        }
+    }
+
+    /// A delivery the notification layer reports as failed gives its reservation back so a later
+    /// check retries. (On desktop the plugin usually cannot tell, so a dropped alert is not retried.)
     pub fn release(&mut self, provider: &str) {
         self.alerted.remove(provider);
     }
@@ -125,16 +138,39 @@ pub fn observe_codex_usage<R: Runtime>(
     account_id: &str,
     result: &Result<UsageInfo, String>,
 ) {
+    // Accounts deleted since an earlier failure must not keep the episode open.
+    if let Ok(store) = crate::auth::load_accounts() {
+        let live: HashSet<String> = store.accounts.iter().map(|a| a.id.clone()).collect();
+        if let Ok(mut episodes) = EPISODES.lock() {
+            episodes.prune("codex", &live);
+        }
+    }
     observe(app, "codex", "Codex", account_id, classify_usage(result));
 }
 
-/// Same for a provider's sign-in probe (`signedIn` of "yes" is fresh, "no" is failed).
-pub fn observe_probe<R: Runtime>(app: &AppHandle<R>, id: &str, label: &str, signed_in: &str) {
-    let outcome = match signed_in {
-        "yes" => Outcome::Fresh,
-        "no" => Outcome::SignInFailed,
+/// Providers whose probe has said "yes" at least once this run. A probe's "no" only counts as an
+/// expired sign-in after that: never having signed in (or using an API key the probe ignores)
+/// is not an expiry and must not raise an alert.
+static PROBE_WAS_SIGNED_IN: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn probe_outcome(seen: &mut HashSet<String>, id: &str, signed_in: &str) -> Outcome {
+    match signed_in {
+        "yes" => {
+            seen.insert(id.to_string());
+            Outcome::Fresh
+        }
+        "no" if seen.contains(id) => Outcome::SignInFailed,
         _ => Outcome::Other,
-    };
+    }
+}
+
+/// Same for a provider's sign-in probe (`signedIn` of "yes" is fresh, "no" after a "yes" is failed).
+pub fn observe_probe<R: Runtime>(app: &AppHandle<R>, id: &str, label: &str, signed_in: &str) {
+    let outcome = PROBE_WAS_SIGNED_IN
+        .lock()
+        .map(|mut seen| probe_outcome(&mut seen, id, signed_in))
+        .unwrap_or(Outcome::Other);
     observe(app, id, label, id, outcome);
 }
 
@@ -159,7 +195,9 @@ pub fn alert_text(label: &str) -> (String, String) {
     )
 }
 
-/// Shows one local notification. False means it was not shown (permission refused or an error).
+/// Shows one local notification. False means the layer itself reported a refusal or an error;
+/// on desktop the plugin always reports permission as granted and hides later delivery errors, so
+/// a notification the OS drops cannot be detected here.
 fn deliver<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
     use tauri_plugin_notification::{NotificationExt, PermissionState};
 
@@ -174,7 +212,7 @@ fn deliver<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
     let permitted = match notification.permission_state() {
         Ok(PermissionState::Granted) => true,
         Ok(PermissionState::Denied) => false,
-        // Not asked yet: ask once; a refusal is rechecked next episode without a prompt loop.
+        // Mobile only in practice: ask once; a refusal is rechecked next episode without a prompt loop.
         _ => matches!(
             notification.request_permission(),
             Ok(PermissionState::Granted)
@@ -295,6 +333,40 @@ mod tests {
         // Another account being healthy says nothing about account a.
         e.record("codex", "z", Outcome::Fresh);
         assert!(!e.record("codex", "a", Outcome::SignInFailed));
+    }
+
+    #[test]
+    fn deleted_accounts_cannot_hold_an_episode_open() {
+        let mut e = Episodes::default();
+        assert!(e.record("codex", "old", Outcome::SignInFailed));
+        // The account was deleted; only "new" exists now.
+        let live: HashSet<String> = ["new".to_string()].into();
+        e.prune("codex", &live);
+        assert!(e.record("codex", "new", Outcome::SignInFailed));
+        // A surviving failing account keeps its own episode.
+        let mut e = Episodes::default();
+        e.record("codex", "a", Outcome::SignInFailed);
+        e.record("codex", "b", Outcome::SignInFailed);
+        e.prune("codex", &["a".to_string()].into());
+        assert!(!e.record("codex", "c", Outcome::SignInFailed));
+    }
+
+    #[test]
+    fn a_probe_no_only_counts_after_a_yes() {
+        let mut seen = HashSet::new();
+        // Never signed in, or an API key the probe ignores: no alert.
+        assert_eq!(probe_outcome(&mut seen, "cursor", "no"), Outcome::Other);
+        assert_eq!(
+            probe_outcome(&mut seen, "cursor", "unknown"),
+            Outcome::Other
+        );
+        assert_eq!(probe_outcome(&mut seen, "cursor", "yes"), Outcome::Fresh);
+        assert_eq!(
+            probe_outcome(&mut seen, "cursor", "no"),
+            Outcome::SignInFailed
+        );
+        // Another provider is tracked on its own.
+        assert_eq!(probe_outcome(&mut seen, "grok", "no"), Outcome::Other);
     }
 
     #[test]

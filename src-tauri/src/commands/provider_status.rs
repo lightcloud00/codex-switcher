@@ -14,14 +14,23 @@ use std::{
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
-/// (id, label, status page base URL). Copilot has no page of its own; GitHub's page covers it.
-const PROVIDERS: [(&str, &str, &str); 5] = [
-    ("openai", "OpenAI", "https://status.openai.com"),
-    ("claude", "Claude", "https://status.claude.com"),
-    ("cursor", "Cursor", "https://status.cursor.com"),
-    ("factory", "Factory", "https://status.factory.ai"),
-    ("copilot", "GitHub Copilot", "https://www.githubstatus.com"),
+/// (id, label, status page base URL, component). Copilot has no page of its own: it is one
+/// component of GitHub's page, so only that component counts (an Actions or Pages incident must
+/// not show as a Copilot outage). The others use the page-wide indicator.
+const PROVIDERS: [(&str, &str, &str, Option<&str>); 5] = [
+    ("openai", "OpenAI", "https://status.openai.com", None),
+    ("claude", "Claude", "https://status.claude.com", None),
+    ("cursor", "Cursor", "https://status.cursor.com", None),
+    ("factory", "Factory", "https://status.factory.ai", None),
+    (
+        "copilot",
+        "GitHub Copilot",
+        "https://www.githubstatus.com",
+        Some("Copilot"),
+    ),
 ];
+/// `summary.json` lists every component and open incident, so it gets a larger cap.
+const MAX_SUMMARY_BYTES: usize = 256 * 1024;
 
 /// How often the background poller asks (tray setup spawns it).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -119,6 +128,50 @@ fn sanitize_description(raw: &str) -> String {
     format!("{}…", cut.trim_end())
 }
 
+#[derive(Deserialize)]
+struct SummaryDocument {
+    #[serde(default)]
+    components: Vec<SummaryComponent>,
+}
+
+#[derive(Deserialize)]
+struct SummaryComponent {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    status: String,
+}
+
+/// Reads one named component out of a Statuspage `summary.json`. A missing component or an
+/// unfamiliar status is an error, never "all clear" and never an outage.
+fn parse_component_body(body: &[u8], name: &str) -> Result<(Indicator, String), String> {
+    if body.len() > MAX_SUMMARY_BYTES {
+        return Err("status response too large".to_string());
+    }
+    let doc: SummaryDocument =
+        serde_json::from_slice(body).map_err(|_| "status response not understood".to_string())?;
+    let component = doc
+        .components
+        .iter()
+        .find(|c| c.name.trim().eq_ignore_ascii_case(name))
+        .ok_or_else(|| "status component not found".to_string())?;
+    let indicator = match component.status.trim() {
+        "operational" => Indicator::None,
+        "degraded_performance" => Indicator::Minor,
+        "partial_outage" => Indicator::Major,
+        "major_outage" => Indicator::Critical,
+        "under_maintenance" => Indicator::Maintenance,
+        _ => return Err("status component not understood".to_string()),
+    };
+    let words = component.status.replace('_', " ");
+    let mut chars = words.chars();
+    let description = chars
+        .next()
+        .map(|first| format!("{}{}", first.to_ascii_uppercase(), chars.as_str()))
+        .unwrap_or_default();
+    Ok((indicator, sanitize_description(&description)))
+}
+
 struct Entry {
     status: ProviderStatus,
     checked: Instant,
@@ -145,11 +198,20 @@ fn client() -> Result<reqwest::Client, String> {
 
 async fn fetch_one(
     client: &reqwest::Client,
-    provider: &(&'static str, &'static str, &'static str),
+    provider: &(
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+    ),
 ) -> Result<ProviderStatus, String> {
-    let (id, label, base) = *provider;
+    let (id, label, base, component) = *provider;
+    let (path, cap) = match component {
+        Some(_) => ("summary.json", MAX_SUMMARY_BYTES),
+        None => ("status.json", MAX_BODY_BYTES),
+    };
     let response = client
-        .get(format!("{base}/api/v2/status.json"))
+        .get(format!("{base}/api/v2/{path}"))
         .send()
         .await
         .map_err(|_| "status request failed".to_string())?;
@@ -158,7 +220,7 @@ async fn fetch_one(
     }
     if response
         .content_length()
-        .is_some_and(|len| len as usize > MAX_BODY_BYTES)
+        .is_some_and(|len| len as usize > cap)
     {
         return Err("status response too large".to_string());
     }
@@ -166,7 +228,10 @@ async fn fetch_one(
         .bytes()
         .await
         .map_err(|_| "status response unreadable".to_string())?;
-    let (indicator, description) = parse_status_body(&body)?;
+    let (indicator, description) = match component {
+        Some(name) => parse_component_body(&body, name)?,
+        None => parse_status_body(&body)?,
+    };
     Ok(ProviderStatus {
         id,
         label,
@@ -204,7 +269,7 @@ fn fresh_entries(now: Instant) -> Vec<ProviderStatus> {
     };
     PROVIDERS
         .iter()
-        .filter_map(|(id, _, _)| cache.get(id))
+        .filter_map(|(id, _, _, _)| cache.get(id))
         .filter(|entry| now.saturating_duration_since(entry.checked) <= STALE_AFTER)
         .map(|entry| entry.status.clone())
         .collect()
@@ -248,7 +313,7 @@ fn cache_is_fresh() -> bool {
     let Ok(cache) = CACHE.lock() else {
         return false;
     };
-    PROVIDERS.iter().all(|(id, _, _)| {
+    PROVIDERS.iter().all(|(id, _, _, _)| {
         cache
             .get(id)
             .is_some_and(|entry| entry.checked.elapsed() <= CACHE_TTL)
@@ -374,6 +439,46 @@ mod tests {
         assert!(parse_status_body(br#"{"status":{}}"#).is_err());
         assert!(parse_status_body(b"<html>blocked</html>").is_err());
         assert!(parse_status_body(b"{}").is_err());
+    }
+
+    #[test]
+    fn copilot_reads_its_own_component_not_the_page_rollup() {
+        // An Actions incident makes the page "minor" but Copilot itself is fine.
+        let body = br#"{"status":{"indicator":"minor"},"components":[
+            {"name":"Actions","status":"partial_outage"},
+            {"name":"Copilot","status":"operational"},
+            {"name":"Copilot AI Model Providers","status":"major_outage"}]}"#;
+        assert_eq!(
+            parse_component_body(body, "Copilot").unwrap().0,
+            Indicator::None
+        );
+        let bad = br#"{"components":[{"name":"Copilot","status":"degraded_performance"}]}"#;
+        let (indicator, description) = parse_component_body(bad, "Copilot").unwrap();
+        assert_eq!(indicator, Indicator::Minor);
+        assert_eq!(description, "Degraded performance");
+        for (status, expected) in [
+            ("partial_outage", Indicator::Major),
+            ("major_outage", Indicator::Critical),
+            ("under_maintenance", Indicator::Maintenance),
+        ] {
+            let b = format!(r#"{{"components":[{{"name":"copilot","status":"{status}"}}]}}"#);
+            assert_eq!(
+                parse_component_body(b.as_bytes(), "Copilot").unwrap().0,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_odd_components_are_errors_not_outages() {
+        assert!(parse_component_body(br#"{"components":[]}"#, "Copilot").is_err());
+        assert!(parse_component_body(
+            br#"{"components":[{"name":"Copilot","status":"??"}]}"#,
+            "Copilot"
+        )
+        .is_err());
+        assert!(parse_component_body(b"<html>", "Copilot").is_err());
+        assert!(parse_component_body(&vec![b' '; MAX_SUMMARY_BYTES + 1], "Copilot").is_err());
     }
 
     #[test]
