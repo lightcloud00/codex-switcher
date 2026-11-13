@@ -116,6 +116,12 @@ impl Episodes {
         }
     }
 
+    /// Drops one account's episode (an archived Claude seat).
+    pub fn forget(&mut self, provider: &str) {
+        self.failing.remove(provider);
+        self.alerted.remove(provider);
+    }
+
     /// A delivery the notification layer reports as failed gives its reservation back so a later
     /// check retries. (On desktop the plugin usually cannot tell, so a dropped alert is not retried.)
     pub fn release(&mut self, provider: &str) {
@@ -175,7 +181,13 @@ pub fn observe_probe<R: Runtime>(app: &AppHandle<R>, id: &str, label: &str, sign
 }
 
 /// Provider id of the Claude seats (claude-usage accounts); kept apart from any single-login probe.
+/// It picks the alert text; each seat has its own episode under `claude-seats:<account>`, so one
+/// seat that is already signed out cannot hide another seat losing its login.
 const CLAUDE_SEATS: &str = "claude-seats";
+
+fn claude_episode_key(account: &str) -> String {
+    format!("{CLAUDE_SEATS}:{account}")
+}
 
 /// What one claude-usage account row says about its seat's sign-in. claude-usage states it outright
 /// (`signed_in: false`, "signed out: run /login ..."), so nothing is guessed from missing numbers:
@@ -201,65 +213,105 @@ pub fn classify_claude_account(account: &serde_json::Value) -> Outcome {
     }
 }
 
-/// A seat's "no" only counts after a "yes" from the same seat in this run, so a seat that was
-/// already signed out when the app opened (or never signed in) does not raise an alert.
-fn gated_outcome(seen: &mut HashSet<String>, key: &str, raw: Outcome) -> Outcome {
-    match raw {
-        Outcome::Fresh => {
-            seen.insert(key.to_string());
-            Outcome::Fresh
-        }
-        Outcome::SignInFailed if seen.contains(key) => Outcome::SignInFailed,
-        _ => Outcome::Other,
-    }
-}
-
-/// Outcomes for every visible seat account of one claude-usage summary. Archived (hidden) seats
-/// are skipped entirely.
-pub fn claude_outcomes(
-    accounts: &[serde_json::Value],
-    hidden_labels: &HashSet<String>,
-    seen: &mut HashSet<String>,
-) -> Vec<(String, Outcome)> {
-    accounts
-        .iter()
-        .filter_map(|account| {
-            let name = account.get("account")?.as_str()?;
-            if hidden_labels.contains(name) {
-                // Unarchiving a seat that is signed out must not alert as if it had just lost its login.
-                seen.remove(name);
-                return None;
-            }
-            let outcome = gated_outcome(seen, name, classify_claude_account(account));
-            Some((name.to_string(), outcome))
-        })
-        .collect()
-}
-
 /// What the Claude observer remembers between summaries.
+///
+/// Scope: claude-usage only reports `signed_in` for seats on this Mac (kind `local`). A remote seat
+/// (Windows, WSL) is always `signed_in: null` and its lost login reads as a non-sign-in error, so
+/// remote seats never alert. Archived seats also never alert; seats that only share a login with an
+/// archived one (`shares_login_with`) are not hidden here.
 #[derive(Default)]
 struct ClaudeState {
-    /// seats seen signed in during this run
+    /// seats confirmed signed in during this run (two separate summaries in a row)
     seen: HashSet<String>,
-    /// `generated_at` of the newest summary applied
-    last: String,
+    /// seat -> `generated_at` of the one summary that said "signed in" so far. claude-usage answers
+    /// from cached probes and refreshes them in the background, so a single old "signed in" proves
+    /// nothing: a seat only counts as having been signed in after two different summaries say so.
+    pending: HashMap<String, String>,
+    /// newest summary applied
+    last: Option<chrono::DateTime<chrono::FixedOffset>>,
 }
 
-/// True when `generated` is older than a summary already applied. Concurrent fetches can finish out
-/// of order, and an older "signed in" must not end an episode a newer "signed out" started.
-fn is_stale_summary(last: &mut String, generated: &str) -> bool {
-    if generated.is_empty() {
-        return false;
+impl ClaudeState {
+    /// True when `generated` is older than a summary already applied. Concurrent fetches can finish
+    /// out of order, and an older "signed in" must not end an episode a newer "signed out" started.
+    /// An unparseable timestamp is applied (nothing to compare).
+    fn is_stale(&mut self, generated: &str) -> bool {
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(generated) else {
+            return false;
+        };
+        match self.last {
+            Some(last) if at < last => true,
+            _ => {
+                self.last = Some(at);
+                false
+            }
+        }
     }
-    if generated < last.as_str() {
-        return true;
+
+    fn gate(&mut self, name: &str, raw: Outcome, generated: &str) -> Outcome {
+        match raw {
+            Outcome::Fresh if self.seen.contains(name) => Outcome::Fresh,
+            Outcome::Fresh => match self.pending.get(name) {
+                Some(first) if first != generated => {
+                    self.pending.remove(name);
+                    self.seen.insert(name.to_string());
+                    Outcome::Fresh
+                }
+                Some(_) => Outcome::Other,
+                None => {
+                    self.pending.insert(name.to_string(), generated.to_string());
+                    Outcome::Other
+                }
+            },
+            // A "no" only counts for a seat confirmed signed in this run, so a seat that was already
+            // signed out when the app opened (or never signed in) does not alert.
+            Outcome::SignInFailed => {
+                self.pending.remove(name);
+                if self.seen.contains(name) {
+                    Outcome::SignInFailed
+                } else {
+                    Outcome::Other
+                }
+            }
+            Outcome::Other => Outcome::Other,
+        }
     }
-    *last = generated.to_string();
-    false
+
+    /// Applies one claude-usage summary and returns the seats that need a new alert. A seat missing
+    /// from a summary changes nothing; an archived seat is forgotten (history and open episode).
+    fn apply(
+        &mut self,
+        episodes: &mut Episodes,
+        accounts: &[serde_json::Value],
+        hidden_labels: &HashSet<String>,
+        generated: &str,
+    ) -> Vec<String> {
+        if self.is_stale(generated) {
+            return Vec::new();
+        }
+        let mut alerts = Vec::new();
+        for account in accounts {
+            let Some(name) = account.get("account").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let key = claude_episode_key(name);
+            if hidden_labels.contains(name) {
+                self.seen.remove(name);
+                self.pending.remove(name);
+                episodes.forget(&key);
+                continue;
+            }
+            let outcome = self.gate(name, classify_claude_account(account), generated);
+            if episodes.record(&key, name, outcome) {
+                alerts.push(name.to_string());
+            }
+        }
+        alerts
+    }
 }
 
-/// Feeds one claude-usage summary into the episode tracker: one alert when a seat that was signed
-/// in loses its login, none for seats that were already signed out, hidden, busy or unreadable.
+/// Feeds one claude-usage summary into the episode tracker: one alert per seat that was signed in
+/// and loses its login, none for seats already signed out, archived, remote, busy or unreadable.
 /// `hidden_labels` is `None` when the archived-seat list could not be read; the summary is then
 /// skipped, because guessing "nothing is archived" would alert for archived seats.
 pub fn observe_claude_usage<R: Runtime>(
@@ -279,22 +331,18 @@ pub fn observe_claude_usage<R: Runtime>(
         .get("generated_at")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let rows = match CLAUDE_STATE.lock() {
-        Ok(mut state) => {
-            if is_stale_summary(&mut state.last, generated) {
-                return;
-            }
-            claude_outcomes(accounts, hidden_labels, &mut state.seen)
-        }
-        Err(_) => return,
+    // One guard from the stale check to the last record, so overlapping fetches cannot interleave.
+    // Lock order is CLAUDE_STATE, then EPISODES; nothing awaits while they are held.
+    let Ok(mut state) = CLAUDE_STATE.lock() else {
+        return;
     };
-    // Seats that disappeared (or were archived) must not keep an episode open.
-    let live: HashSet<String> = rows.iter().map(|(name, _)| name.clone()).collect();
-    if let Ok(mut episodes) = EPISODES.lock() {
-        episodes.prune(CLAUDE_SEATS, &live);
-    }
-    for (name, outcome) in rows {
-        observe(app, CLAUDE_SEATS, "Claude", &name, outcome);
+    let Ok(mut episodes) = EPISODES.lock() else {
+        return;
+    };
+    for name in state.apply(&mut episodes, accounts, hidden_labels, generated) {
+        if !deliver(app, CLAUDE_SEATS, "Claude") {
+            episodes.release(&claude_episode_key(&name));
+        }
     }
 }
 
@@ -583,104 +631,204 @@ mod tests {
         }
     }
 
+    const T1: &str = "2026-11-12T22:00:00Z";
+    const T2: &str = "2026-11-12T22:10:00Z";
+    const T3: &str = "2026-11-12T22:20:00Z";
+    const T4: &str = "2026-11-12T22:30:00Z";
+
+    fn out(a: &str) -> serde_json::Value {
+        row(
+            a,
+            serde_json::json!(false),
+            serde_json::json!("signed out: run /login for this seat"),
+        )
+    }
+
+    fn inn(a: &str) -> serde_json::Value {
+        row(a, serde_json::json!(true), serde_json::json!(null))
+    }
+
+    fn feed(
+        state: &mut ClaudeState,
+        episodes: &mut Episodes,
+        accounts: Vec<serde_json::Value>,
+        at: &str,
+    ) -> Vec<String> {
+        state.apply(episodes, &accounts, &HashSet::new(), at)
+    }
+
     #[test]
     fn a_seat_signed_out_at_launch_is_silent_and_one_that_loses_its_login_alerts_once() {
-        use serde_json::json;
-        let hidden = HashSet::new();
-        let mut seen = HashSet::new();
-        let mut episodes = Episodes::default();
-        let mut alerts = 0;
-        let mut feed = |accounts: Vec<serde_json::Value>, seen: &mut HashSet<String>| -> u32 {
-            let mut new_alerts = 0;
-            for (name, outcome) in claude_outcomes(&accounts, &hidden, seen) {
-                if episodes.record("claude-seats", &name, outcome) {
-                    new_alerts += 1;
-                }
-            }
-            new_alerts
-        };
-        let out = |a: &str| {
-            row(
-                a,
-                json!(false),
-                json!("signed out: run /login for this seat"),
-            )
-        };
-        let inn = |a: &str| row(a, json!(true), json!(null));
-        // Already signed out when the app opens: no alert, however often it is checked.
-        alerts += feed(vec![out("mac-main-max"), inn("windows-max")], &mut seen);
-        alerts += feed(vec![out("mac-main-max"), inn("windows-max")], &mut seen);
-        assert_eq!(alerts, 0);
-        // windows-max was signed in this run, then loses its login: exactly one alert.
-        alerts += feed(vec![out("mac-main-max"), out("windows-max")], &mut seen);
-        alerts += feed(vec![out("mac-main-max"), out("windows-max")], &mut seen);
-        assert_eq!(alerts, 1);
-        // Signing back in ends the episode; the next loss alerts again.
-        alerts += feed(vec![out("mac-main-max"), inn("windows-max")], &mut seen);
-        alerts += feed(vec![out("mac-main-max"), out("windows-max")], &mut seen);
-        assert_eq!(alerts, 2);
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        // mac-main-max is already signed out when the app opens: silent however often it is checked.
+        // mac-gustavo-max is signed in; two summaries in a row confirm it.
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max"), inn("mac-gustavo-max")],
+            T1
+        )
+        .is_empty());
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max"), inn("mac-gustavo-max")],
+            T2
+        )
+        .is_empty());
+        // mac-gustavo-max now loses its login: exactly one alert, however many summaries follow.
+        assert_eq!(
+            feed(
+                &mut state,
+                &mut episodes,
+                vec![out("mac-main-max"), out("mac-gustavo-max")],
+                T3
+            ),
+            ["mac-gustavo-max"]
+        );
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max"), out("mac-gustavo-max")],
+            T4
+        )
+        .is_empty());
     }
 
     #[test]
-    fn archived_seats_are_skipped() {
-        use serde_json::json;
-        let hidden: HashSet<String> = ["windows-max".to_string()].into();
-        let mut seen = HashSet::new();
-        let rows = claude_outcomes(
-            &[
-                row("windows-max", json!(true), json!(null)),
-                row("wsl-max", json!(true), json!(null)),
-            ],
-            &hidden,
-            &mut seen,
+    fn signing_back_in_ends_the_episode_and_the_next_loss_alerts_again() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T1);
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T2);
+        assert_eq!(
+            feed(&mut state, &mut episodes, vec![out("mac-main-max")], T3),
+            ["mac-main-max"]
         );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "wsl-max");
-        assert!(!seen.contains("windows-max"));
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T4);
+        assert_eq!(
+            feed(
+                &mut state,
+                &mut episodes,
+                vec![out("mac-main-max")],
+                "2026-11-12T22:40:00Z"
+            ),
+            ["mac-main-max"]
+        );
     }
 
     #[test]
-    fn unarchiving_a_signed_out_seat_does_not_alert_and_unknown_rows_never_seed_a_login() {
-        use serde_json::json;
-        let mut seen = HashSet::new();
-        // An unknown row (null / null) does not count as having been signed in.
-        claude_outcomes(
-            &[row("s", json!(null), json!(null))],
-            &HashSet::new(),
-            &mut seen,
+    fn a_second_seat_losing_its_login_still_alerts_while_the_first_is_failing() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        let both_in = || vec![inn("mac-main-max"), inn("mac-096-max")];
+        feed(&mut state, &mut episodes, both_in(), T1);
+        feed(&mut state, &mut episodes, both_in(), T2);
+        assert_eq!(
+            feed(
+                &mut state,
+                &mut episodes,
+                vec![out("mac-main-max"), inn("mac-096-max")],
+                T3
+            ),
+            ["mac-main-max"]
         );
-        assert!(seen.is_empty());
-        claude_outcomes(
-            &[row("s", json!(true), json!(null))],
-            &HashSet::new(),
-            &mut seen,
+        assert_eq!(
+            feed(
+                &mut state,
+                &mut episodes,
+                vec![out("mac-main-max"), out("mac-096-max")],
+                T4
+            ),
+            ["mac-096-max"]
         );
-        assert!(seen.contains("s"));
-        // Archiving forgets the seat, so unarchiving it while signed out is silent.
-        let hidden: HashSet<String> = ["s".to_string()].into();
-        claude_outcomes(&[row("s", json!(true), json!(null))], &hidden, &mut seen);
-        let rows = claude_outcomes(
-            &[row(
-                "s",
-                json!(false),
-                json!("signed out: run /login for this seat"),
-            )],
-            &HashSet::new(),
-            &mut seen,
+    }
+
+    #[test]
+    fn one_old_cached_signed_in_does_not_arm_a_seat() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        // The first summary answers from a stale cache ("true"); the background refresh then says
+        // the seat has long been signed out. No alert: it was never confirmed signed in.
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T1);
+        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T2).is_empty());
+        // The same summary seen twice (two overlapping calls) is one observation, not two.
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T3);
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T3);
+        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T4).is_empty());
+    }
+
+    #[test]
+    fn a_summary_that_omits_a_seat_changes_nothing_for_it() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T1);
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T2);
+        assert_eq!(
+            feed(&mut state, &mut episodes, vec![out("mac-main-max")], T3),
+            ["mac-main-max"]
         );
-        assert_eq!(rows[0].1, Outcome::Other);
+        // The seat drops out of one summary (host left out, or a row without an account name)...
+        feed(
+            &mut state,
+            &mut episodes,
+            vec![serde_json::json!({"probe_error": null})],
+            T4,
+        );
+        // ...and is signed out again in the next: still the same episode, no second alert.
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max")],
+            "2026-11-12T22:40:00Z"
+        )
+        .is_empty());
     }
 
     #[test]
     fn an_older_summary_that_finishes_late_is_ignored() {
-        let mut last = String::new();
-        assert!(!is_stale_summary(&mut last, "2026-11-12T22:00:00Z"));
-        assert!(!is_stale_summary(&mut last, "2026-11-12T22:10:00Z"));
-        assert!(is_stale_summary(&mut last, "2026-11-12T22:05:00Z"));
-        assert_eq!(last, "2026-11-12T22:10:00Z");
-        // A summary without a timestamp is applied (nothing to compare) and leaves the mark alone.
-        assert!(!is_stale_summary(&mut last, ""));
-        assert_eq!(last, "2026-11-12T22:10:00Z");
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T1);
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T2);
+        // The newer "signed out" (T4) lands first and alerts; the older "signed in" (T3) arrives late.
+        assert_eq!(
+            feed(&mut state, &mut episodes, vec![out("mac-main-max")], T4),
+            ["mac-main-max"]
+        );
+        assert!(feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T3).is_empty());
+        // It did not end the episode: the next signed-out summary does not alert again.
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max")],
+            "2026-11-12T22:40:00Z"
+        )
+        .is_empty());
+        // Timestamps compare as times, not text: 09:00 in +05:00 is before 05:00Z.
+        let mut s = ClaudeState::default();
+        assert!(!s.is_stale("2026-11-12T05:00:00Z"));
+        assert!(s.is_stale("2026-11-12T09:00:00+05:00"));
+        assert!(!s.is_stale("not a time"));
+    }
+
+    #[test]
+    fn archived_seats_are_skipped_forgotten_and_silent_after_unarchiving() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T1);
+        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T2);
+        let hidden: HashSet<String> = ["mac-main-max".to_string()].into();
+        // Archived: no alert even though it reports signed out, and its history is dropped.
+        assert!(state
+            .apply(&mut episodes, &[out("mac-main-max")], &hidden, T3)
+            .is_empty());
+        assert!(!state.seen.contains("mac-main-max"));
+        // Unarchived while signed out: silent, as for any seat that was already signed out.
+        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T4).is_empty());
+    }
+
+    #[test]
+    fn unknown_rows_never_confirm_a_login() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        let unknown = || vec![row("s", serde_json::json!(null), serde_json::json!(null))];
+        feed(&mut state, &mut episodes, unknown(), T1);
+        feed(&mut state, &mut episodes, unknown(), T2);
+        assert!(state.seen.is_empty() && state.pending.is_empty());
     }
 
     #[test]
