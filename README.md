@@ -22,15 +22,21 @@
 
 ## Features
 
+The main window has five views: **Overview** (Codex, Claude, API credits and client status side by side), **Use next** (which account to use now), **Codex** (the accounts below), **Claude** (seats, usage and dates) and **Providers** (API credits, provider access with sign-in checks and plan dates, and the Gemini CLI quota card).
+
 - **Multi-Account Management** – Add, rename, mask, import, export, and manage multiple Codex accounts in one place
 - **Quick Switching** – Switch between accounts from the main window, native tray menu, or tray popup while preserving rotated ChatGPT sessions
 - **Usage Stats** – View account usage stats for OAuth accounts, including lifetime tokens, daily buckets, streaks, activity insights, and top integrations
 - **Manual Reset Credits** – See available manual reset credits beside each account plan badge, with the closest expiry highlighted as it approaches
 - **Automatic Warm-Up** – Warm up one account or all accounts manually, after each 5-hour reset window, or at specific scheduled times of day
 - **System Tray Controls** – Use the tray popup to switch accounts, inspect quota and active-account stats, refresh usage, open the main window, or quit the app
-- **Tray Display Modes** – Choose between the app icon with session percentage, a text-only hourly/weekly percentage display, or a hidden tray icon
+- **Tray Display Modes** – Choose between the app icon with session percentage (**Icon + Session**), a text-only hourly/weekly percentage display (**Hourly + Weekly**), the top account from the **Use next** view (**Use next**), or a hidden tray icon (**Hidden**)
 - **macOS Dock Control** – Keep Codex Switcher in the Dock or run it as a menu bar only app, with a first-close prompt and a tray fallback
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
+- **Reset Countdowns** – The tray popup and the native tray menu show the time left until each window resets, for example `5h:73% ↻2h 5m`
+- **Provider Outage Badges** – A badge in the tray popup and a line in the native tray menu when OpenAI, Claude, Cursor, Factory or GitHub Copilot report an incident on their public status pages (see [Provider outage badges](#provider-outage-badges))
+- **Sign-In Expiry Alerts** – One local notification per provider when a login that was working stops working (see [Sign-in expiry alerts](#sign-in-expiry-alerts))
+- **Gemini CLI Quota** – A card on the Providers view with the Gemini CLI's remaining quota per model tier (see [Gemini CLI quota](#gemini-cli-quota))
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
 - **Conversation Recovery** – Optionally continue quota-stopped chats and running macOS chats interrupted by account switching
 - **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
@@ -39,7 +45,7 @@
 
 ### Download a Release
 
-The easiest way to install Codex Switcher is from the latest GitHub release:
+The links below point at the upstream project (`Lampese/codex-switcher`), not this fork. To run this fork's changes, [build from source](#build-from-source). The upstream release is the easiest way to try the original app:
 
 [Download the latest release](https://github.com/Lampese/codex-switcher/releases/latest)
 
@@ -60,17 +66,17 @@ Choose the file for your platform:
 > open "/Applications/Codex Switcher.app"
 > ```
 
-### Auto Updates
+### Updates
 
-Codex Switcher checks the latest GitHub release on startup. When a newer signed
-update package is available, the app shows an update prompt and can install it
-from inside the app.
+This fork has no in-app updater: the app never checks for or installs a release,
+so an upstream release cannot replace your build. Updates come from rebuilding
+this fork (see [Build from Source](#build-from-source)).
 
 ### Build from Source
 
 #### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18+)
+- [Node.js](https://nodejs.org/) (v18+ to build the app; v22.6+ to run `pnpm test`, which uses `node --experimental-strip-types`)
 - [pnpm](https://pnpm.io/)
 - [Rust](https://rustup.rs/)
 
@@ -95,6 +101,20 @@ pnpm tauri build
 
 The built application will be in `src-tauri/target/release/bundle/`.
 
+#### Scripts
+
+| Script | What it does |
+| --- | --- |
+| `pnpm dev` / `pnpm build` / `pnpm preview` | Vite dev server, type-check plus production build, preview of the build |
+| `pnpm tauri ...` / `pnpm tauri:win ...` | Tauri CLI (see the Windows note above) |
+| `pnpm lan` | Build the frontend and serve it over HTTP (see below) |
+| `pnpm test` | All tests in `tests/` |
+| `pnpm test:claude-usage`, `test:desktop-reopen`, `test:browser-runtime`, `test:close-preference`, `test:reset-credits`, `test:updater` | One test file or group |
+| `pnpm version:bump`, `version:patch`, `version:minor`, `version:major` | Keep versions in sync (see [Versioning](#versioning)) |
+| `pnpm release`, `release:patch`, `release:minor`, `release:major` | Prepare a release commit and tag |
+
+Rust tests: `cargo test --lib` from `src-tauri/`.
+
 ### Run the Dashboard in a Browser
 
 You can also serve the built dashboard over HTTP instead of opening the Tauri shell.
@@ -109,7 +129,7 @@ Optional environment variables:
 - `CODEX_SWITCHER_WEB_HOST` to override the bind host
 - `CODEX_SWITCHER_WEB_PORT` to override the port
 
-The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
+The browser dashboard serves the same UI through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely. It serves a subset of the desktop commands: account, usage, login, warm-up, Claude seat, provider-dates and backup routes are there. Window and tray commands, the display settings and monitoring switches, outage badges (`get_provider_status`), the Gemini quota card (`get_gemini_quota`), API credits, client status and the sign-in check are not served, so those parts need the desktop app. `codex-web` exits with status 1 and prints the error if it cannot bind the port.
 
 ## Usage and Reset Credits
 
@@ -191,7 +211,7 @@ Dock mode.
 A warm-up sends one minimal request to an account so its current usage window
 has activity before you need it.
 
-- **Manual** – warm up a single or all accounts, from the main window or tray menu.
+- **Manual** – warm up a single or all accounts from the main window. The tray popup has only the **Auto: on/off** switch for warming all accounts; it has no manual warm-up button.
 - **Automatic** – when enabled (per account or for all), the app tracks the
   5-hour window when available and warms it after each reset, as long as the
   weekly limit isn't exhausted. If only the weekly window is available, it
@@ -212,6 +232,54 @@ which stops automatically when the app quits:
 ```bash
 caffeinate -i -w "$(pgrep -x 'Codex Switcher')"
 ```
+
+## Provider outage badges
+
+Every few minutes the app reads the public Statuspage `status.json` of OpenAI, Claude, Cursor, Factory and GitHub Copilot (for Copilot it reads `summary.json` and watches the **Copilot** component, because GitHub's page-wide status covers unrelated products). A provider that is degraded, in an outage or under maintenance gets a badge row in the tray popup and a line in the native tray menu.
+
+- Public endpoints only: no cookies, tokens or accounts are involved, and redirects must stay on https.
+- It polls every 5 minutes, reuses an answer for 4 minutes, and drops an answer older than 20 minutes so a stale outage does not stick.
+- On by default. Turn it off with **Settings → Show provider outage badges**.
+
+## Sign-in expiry alerts
+
+When a login that was working stops working, the app shows one local notification for that provider, for example "Codex sign-in expired", with a short fix (for example `Open Codex Switcher to sign in again.`). The alert names the provider only, never an email, account name, token or raw error.
+
+- One alert per failure episode. The episode ends when a fresh, successful check for the account that failed comes back, so repeated refreshes do not repeat the alert. A provider that was already signed out when the app opened, a busy host, a rate limit or a network error never raises one.
+- It covers Codex accounts, the Grok and Cursor sign-in checks on the Providers view, and the Gemini CLI quota check.
+- Episodes live in memory, so restarting the app starts clean.
+- On by default. Turn it off with **Settings → Notify me when a sign-in expires**.
+
+## Gemini CLI quota
+
+The **Providers** view has a **Gemini CLI quota** card with the percentage left and the reset time for the Pro, Flash and Flash Lite tiers. It uses the Gemini CLI's own sign-in (`~/.gemini`, OAuth login only): the login is read in memory for the check and is never shown, logged or saved. Answers are cached for 3 minutes. The card is desktop only.
+
+The OAuth client the CLI uses is read from the installed CLI. If that cannot be found, set these environment variables:
+
+- `GEMINI_OAUTH_CLIENT_ID` and `GEMINI_OAUTH_CLIENT_SECRET` – the client credentials directly
+- `GEMINI_OAUTH2_JS_PATH` – path to the CLI's bundled JavaScript that contains them
+
+## Settings switches
+
+**Settings** has two switches for the monitoring above, both on by default: **Show provider outage badges** and **Notify me when a sign-in expires**. The tray display mode and, on macOS, the Dock icon are in the same place.
+
+## Command-line tools and environment variables
+
+Besides the app, the Rust crate builds two binaries:
+
+- `codex-web` – the browser dashboard server (`pnpm lan`). It exits with status 1 on a startup error.
+- `codex-switcher-capacity-export` – writes a sanitized capacity snapshot for the fleet router: `--output <file>` (required; exits with status 2 without it or when the export fails), `--admission <file>` (optional admission record) and `--include-claude-seats` (also export the Claude seat lanes).
+
+Environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `CODEX_SWITCHER_WEB_HOST`, `CODEX_SWITCHER_WEB_PORT` | Bind address of `codex-web` (default `0.0.0.0:3210`) |
+| `CODEX_HOME` | Codex home directory instead of `~/.codex` |
+| `CODEX_BIN` | Codex CLI binary used by conversation recovery |
+| `CLAUDE_PROMETHEUS_URL` | Prometheus the Claude view overlays seat health from (default `http://127.0.0.1:9090`; loopback or tailnet hosts only) |
+| `AOS_SWITCHER_CLAUDE_SEAT_SUBSCRIPTIONS` | Path to the Claude seat end-date file (default `~/.config/aos/claude-seat-subscriptions.json`) |
+| `GEMINI_OAUTH_CLIENT_ID`, `GEMINI_OAUTH_CLIENT_SECRET`, `GEMINI_OAUTH2_JS_PATH` | Gemini quota card (see above) |
 
 ## Disclaimer
 
