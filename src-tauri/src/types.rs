@@ -49,6 +49,12 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    /// Poll the public provider status pages and show outage badges.
+    #[serde(default = "default_close_behavior_prompt_enabled")]
+    pub provider_status_enabled: bool,
+    /// Send one local notification per provider when its sign-in fails.
+    #[serde(default = "default_close_behavior_prompt_enabled")]
+    pub sign_in_alerts_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -57,6 +63,8 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            provider_status_enabled: true,
+            sign_in_alerts_enabled: true,
         }
     }
 }

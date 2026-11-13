@@ -8,6 +8,8 @@ type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "use_next_text
 interface DisplaySettings {
   tray_display_mode: TrayDisplayMode;
   dock_display_mode: DockDisplayMode | null;
+  provider_status_enabled: boolean;
+  sign_in_alerts_enabled: boolean;
 }
 
 interface SettingsModalProps {
@@ -85,6 +87,20 @@ export function SettingsModal({
     }
   };
 
+  const changeMonitoringSetting = async (setting: "provider_status" | "sign_in_alerts", enabled: boolean) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await invokeBackend("set_monitoring_setting", { setting, enabled });
+      await loadDisplaySettings();
+    } catch (err) {
+      requestId.current += 1;
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const selectClassName = "w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 disabled:opacity-50";
 
   return (
@@ -129,6 +145,32 @@ export function SettingsModal({
                   )}
                 </>
               ) : !error && <p className="text-sm text-gray-500 dark:text-gray-400">Loading display settings...</p>}
+              {displaySettings && (
+                <>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+                    <input
+                      type="checkbox"
+                      checked={displaySettings.provider_status_enabled}
+                      disabled={saving}
+                      onChange={(event) => void changeMonitoringSetting("provider_status", event.target.checked)}
+                      className="h-4 w-4 accent-orange-600"
+                    />
+                    Show provider outage badges
+                  </label>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Checks the public status pages of OpenAI, Claude, Cursor, Factory and GitHub Copilot every few minutes. No account data is sent.</p>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+                    <input
+                      type="checkbox"
+                      checked={displaySettings.sign_in_alerts_enabled}
+                      disabled={saving}
+                      onChange={(event) => void changeMonitoringSetting("sign_in_alerts", event.target.checked)}
+                      className="h-4 w-4 accent-orange-600"
+                    />
+                    Notify me when a sign-in expires
+                  </label>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">One local notification per provider, naming only the provider.</p>
+                </>
+              )}
               {error && <p role="alert" className="text-sm text-red-600 dark:text-red-300">Could not update display settings: {error}</p>}
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>

@@ -23,8 +23,8 @@ use commands::{
     launch_provider, list_accounts, open_codex_recovery_conversation, open_main_window,
     prepare_codex_session_recovery, quit_app, refresh_account_metadata, refresh_all_accounts_usage,
     rename_account, report_usage, report_use_next, resume_codex_session_recovery,
-    save_provider_dates, set_dock_display_mode, set_masked_account_ids, start_login,
-    switch_account, warmup_account, warmup_all_accounts,
+    save_provider_dates, set_dock_display_mode, set_masked_account_ids, set_monitoring_setting,
+    start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
 
@@ -99,6 +99,7 @@ pub fn run() {
             get_provider_access,
             get_provider_status,
             get_gemini_quota,
+            set_monitoring_setting,
             get_api_credits,
             get_client_status,
             get_use_next_plan,

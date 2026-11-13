@@ -117,6 +117,8 @@ pub fn quit_app(app: AppHandle) {
 pub struct DisplaySettings {
     tray_display_mode: TrayDisplayMode,
     dock_display_mode: Option<DockDisplayMode>,
+    provider_status_enabled: bool,
+    sign_in_alerts_enabled: bool,
 }
 
 #[tauri::command]
@@ -129,6 +131,8 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
         } else {
             None
         },
+        provider_status_enabled: settings.provider_status_enabled,
+        sign_in_alerts_enabled: settings.sign_in_alerts_enabled,
     })
 }
 
