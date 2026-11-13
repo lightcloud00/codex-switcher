@@ -181,24 +181,27 @@ fn observe<R: Runtime>(
     account: &str,
     outcome: Outcome,
 ) {
-    if record(provider, account, outcome) && !deliver(app, label) {
+    if record(provider, account, outcome) && !deliver(app, provider, label) {
         if let Ok(mut episodes) = EPISODES.lock() {
             episodes.release(provider);
         }
     }
 }
 
-pub fn alert_text(label: &str) -> (String, String) {
-    (
-        format!("{label} sign-in expired"),
-        "Open Codex Switcher to sign in again.".to_string(),
-    )
+pub fn alert_text(provider: &str, label: &str) -> (String, String) {
+    // Say how to fix it where the fix is not in this app. Provider name only: no email, no error.
+    let fix = match provider {
+        "cursor" => "Run cursor-agent login to sign in again.",
+        "gemini" => "Run gemini to sign in again.",
+        _ => "Open Codex Switcher to sign in again.",
+    };
+    (format!("{label} sign-in expired"), fix.to_string())
 }
 
 /// Shows one local notification. False means the layer itself reported a refusal or an error;
 /// on desktop the plugin always reports permission as granted and hides later delivery errors, so
 /// a notification the OS drops cannot be detected here.
-fn deliver<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
+fn deliver<R: Runtime>(app: &AppHandle<R>, provider: &str, label: &str) -> bool {
     use tauri_plugin_notification::{NotificationExt, PermissionState};
 
     let notification = app.notification();
@@ -214,7 +217,7 @@ fn deliver<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
     if !permitted {
         return false;
     }
-    let (title, body) = alert_text(label);
+    let (title, body) = alert_text(provider, label);
     notification
         .builder()
         .title(title)
@@ -371,9 +374,31 @@ mod tests {
     }
 
     #[test]
-    fn alert_text_names_only_the_provider() {
-        let (title, body) = alert_text("Codex");
+    fn alert_text_names_only_the_provider_and_says_how_to_fix_it() {
+        let (title, body) = alert_text("codex", "Codex");
         assert_eq!(title, "Codex sign-in expired");
         assert_eq!(body, "Open Codex Switcher to sign in again.");
+        assert_eq!(
+            alert_text("cursor", "Cursor").1,
+            "Run cursor-agent login to sign in again."
+        );
+        assert_eq!(
+            alert_text("gemini", "Gemini CLI").1,
+            "Run gemini to sign in again."
+        );
+    }
+
+    /// The same cases are checked against the TypeScript classifier in tests/signInErrors.test.ts.
+    #[test]
+    fn rust_and_typescript_agree_on_the_shared_error_cases() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/sign-in-errors.json"))
+                .unwrap();
+        for e in cases["failures"].as_array().unwrap() {
+            assert!(is_sign_in_failure(e.as_str().unwrap()), "{e}");
+        }
+        for e in cases["others"].as_array().unwrap() {
+            assert!(!is_sign_in_failure(e.as_str().unwrap()), "{e}");
+        }
     }
 }
