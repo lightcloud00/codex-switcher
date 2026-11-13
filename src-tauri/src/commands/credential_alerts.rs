@@ -217,19 +217,26 @@ pub fn classify_claude_account(account: &serde_json::Value) -> Outcome {
 ///
 /// Scope: claude-usage only reports `signed_in` for seats on this Mac (kind `local`). A remote seat
 /// (Windows, WSL) is always `signed_in: null` and its lost login reads as a non-sign-in error, so
-/// remote seats never alert. Archived seats also never alert; seats that only share a login with an
-/// archived one (`shares_login_with`) are not hidden here.
+/// remote seats never alert. Archived seats also never alert, but the archived list is the local
+/// registry only: seats that merely share a login with an archived one (`shares_login_with`) are not
+/// hidden here, and neither is a seat archived through the Windows metadata bridge registry
+/// (`fetch_claude_seats` falls back to it on Windows, `hidden_usage_labels` does not).
 #[derive(Default)]
 struct ClaudeState {
-    /// seats confirmed signed in during this run (two separate summaries in a row)
+    /// seats confirmed signed in during this run
     seen: HashSet<String>,
-    /// seat -> `generated_at` of the one summary that said "signed in" so far. claude-usage answers
-    /// from cached probes and refreshes them in the background, so a single old "signed in" proves
-    /// nothing: a seat only counts as having been signed in after two different summaries say so.
-    pending: HashMap<String, String>,
+    /// seat -> time of the first summary that said "signed in". claude-usage answers from cached
+    /// probes (`generated_at` is just the time of the call) and refreshes a probe in the background
+    /// only once it is about 10 minutes old, so one "signed in", or several within minutes of each
+    /// other, may all be the same hours-old cached answer. A seat counts as having been signed in
+    /// only when a later summary says so again at least `ARM_AFTER` after the first.
+    pending: HashMap<String, chrono::DateTime<chrono::FixedOffset>>,
     /// newest summary applied
     last: Option<chrono::DateTime<chrono::FixedOffset>>,
 }
+
+/// Probe refresh interval (10 minutes) plus slack.
+const ARM_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 
 impl ClaudeState {
     /// True when `generated` is older than a summary already applied. Concurrent fetches can finish
@@ -248,18 +255,24 @@ impl ClaudeState {
         }
     }
 
-    fn gate(&mut self, name: &str, raw: Outcome, generated: &str) -> Outcome {
+    fn gate(
+        &mut self,
+        name: &str,
+        raw: Outcome,
+        at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    ) -> Outcome {
         match raw {
             Outcome::Fresh if self.seen.contains(name) => Outcome::Fresh,
-            Outcome::Fresh => match self.pending.get(name) {
-                Some(first) if first != generated => {
+            // Without a usable summary time nothing can be armed.
+            Outcome::Fresh => match (self.pending.get(name).copied(), at) {
+                (Some(first), Some(now)) if now - first >= ARM_AFTER => {
                     self.pending.remove(name);
                     self.seen.insert(name.to_string());
                     Outcome::Fresh
                 }
-                Some(_) => Outcome::Other,
-                None => {
-                    self.pending.insert(name.to_string(), generated.to_string());
+                (Some(_), _) | (None, None) => Outcome::Other,
+                (None, Some(now)) => {
+                    self.pending.insert(name.to_string(), now);
                     Outcome::Other
                 }
             },
@@ -289,6 +302,7 @@ impl ClaudeState {
         if self.is_stale(generated) {
             return Vec::new();
         }
+        let at = chrono::DateTime::parse_from_rfc3339(generated).ok();
         let mut alerts = Vec::new();
         for account in accounts {
             let Some(name) = account.get("account").and_then(serde_json::Value::as_str) else {
@@ -301,7 +315,7 @@ impl ClaudeState {
                 episodes.forget(&key);
                 continue;
             }
-            let outcome = self.gate(name, classify_claude_account(account), generated);
+            let outcome = self.gate(name, classify_claude_account(account), at);
             if episodes.record(&key, name, outcome) {
                 alerts.push(name.to_string());
             }
@@ -332,16 +346,24 @@ pub fn observe_claude_usage<R: Runtime>(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     // One guard from the stale check to the last record, so overlapping fetches cannot interleave.
-    // Lock order is CLAUDE_STATE, then EPISODES; nothing awaits while they are held.
-    let Ok(mut state) = CLAUDE_STATE.lock() else {
-        return;
+    // Lock order is CLAUDE_STATE, then EPISODES; nothing awaits while they are held. The alerts are
+    // only collected here and shown after both guards are dropped, so a panic in the notification
+    // layer cannot poison the episode tracker the other providers share.
+    let alerts = {
+        let Ok(mut state) = CLAUDE_STATE.lock() else {
+            return;
+        };
+        let Ok(mut episodes) = EPISODES.lock() else {
+            return;
+        };
+        state.apply(&mut episodes, accounts, hidden_labels, generated)
     };
-    let Ok(mut episodes) = EPISODES.lock() else {
-        return;
-    };
-    for name in state.apply(&mut episodes, accounts, hidden_labels, generated) {
-        if !deliver(app, CLAUDE_SEATS, "Claude") {
-            episodes.release(&claude_episode_key(&name));
+    // Several seats failing in one summary show one notification (it names no seat anyway).
+    if !alerts.is_empty() && !deliver(app, CLAUDE_SEATS, "Claude") {
+        if let Ok(mut episodes) = EPISODES.lock() {
+            for name in &alerts {
+                episodes.release(&claude_episode_key(name));
+            }
         }
     }
 }
@@ -632,9 +654,10 @@ mod tests {
     }
 
     const T1: &str = "2026-11-12T22:00:00Z";
-    const T2: &str = "2026-11-12T22:10:00Z";
-    const T3: &str = "2026-11-12T22:20:00Z";
-    const T4: &str = "2026-11-12T22:30:00Z";
+    const T2: &str = "2026-11-12T22:20:00Z";
+    const T3: &str = "2026-11-12T22:40:00Z";
+    const T4: &str = "2026-11-12T23:00:00Z";
+    const T5: &str = "2026-11-12T23:20:00Z";
 
     fn out(a: &str) -> serde_json::Value {
         row(
@@ -706,12 +729,7 @@ mod tests {
         );
         feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T4);
         assert_eq!(
-            feed(
-                &mut state,
-                &mut episodes,
-                vec![out("mac-main-max")],
-                "2026-11-12T22:40:00Z"
-            ),
+            feed(&mut state, &mut episodes, vec![out("mac-main-max")], T5),
             ["mac-main-max"]
         );
     }
@@ -743,16 +761,40 @@ mod tests {
     }
 
     #[test]
-    fn one_old_cached_signed_in_does_not_arm_a_seat() {
+    fn signed_in_summaries_seconds_apart_do_not_arm_a_seat_but_ones_16_minutes_apart_do() {
+        // claude-usage stamps generated_at on every call but reads signed_in from cached probes that
+        // refresh about every 10 minutes: polls 5 s apart can all repeat one hours-old answer.
         let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
-        // The first summary answers from a stale cache ("true"); the background refresh then says
-        // the seat has long been signed out. No alert: it was never confirmed signed in.
-        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T1);
-        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T2).is_empty());
-        // The same summary seen twice (two overlapping calls) is one observation, not two.
-        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T3);
-        feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T3);
-        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T4).is_empty());
+        let seats = || vec![inn("mac-main-max")];
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:00:00Z");
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:00:05Z");
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:14:59Z");
+        // The refresh then shows the seat has long been signed out: no alert, it was never armed.
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max")],
+            "2026-11-12T22:15:30Z"
+        )
+        .is_empty());
+        // A fresh start: first "signed in" at 22:00, the next one 16 minutes later arms it.
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:00:00Z");
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:16:00Z");
+        assert_eq!(
+            feed(
+                &mut state,
+                &mut episodes,
+                vec![out("mac-main-max")],
+                "2026-11-12T22:17:00Z"
+            ),
+            ["mac-main-max"]
+        );
+        // A summary without a usable time arms nothing.
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, seats(), "");
+        feed(&mut state, &mut episodes, seats(), "");
+        assert!(state.seen.is_empty() && state.pending.is_empty());
     }
 
     #[test]
@@ -772,13 +814,7 @@ mod tests {
             T4,
         );
         // ...and is signed out again in the next: still the same episode, no second alert.
-        assert!(feed(
-            &mut state,
-            &mut episodes,
-            vec![out("mac-main-max")],
-            "2026-11-12T22:40:00Z"
-        )
-        .is_empty());
+        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T5).is_empty());
     }
 
     #[test]
@@ -793,13 +829,7 @@ mod tests {
         );
         assert!(feed(&mut state, &mut episodes, vec![inn("mac-main-max")], T3).is_empty());
         // It did not end the episode: the next signed-out summary does not alert again.
-        assert!(feed(
-            &mut state,
-            &mut episodes,
-            vec![out("mac-main-max")],
-            "2026-11-12T22:40:00Z"
-        )
-        .is_empty());
+        assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T5).is_empty());
         // Timestamps compare as times, not text: 09:00 in +05:00 is before 05:00Z.
         let mut s = ClaudeState::default();
         assert!(!s.is_stale("2026-11-12T05:00:00Z"));
