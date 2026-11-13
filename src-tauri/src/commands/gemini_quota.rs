@@ -27,7 +27,10 @@ const CACHE_TTL: Duration = Duration::from_secs(3 * 60);
 const EXPIRY_SKEW_MS: i64 = 60_000;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 /// The CLI bundle is read only to find two public client constants; cap what is scanned.
-const MAX_SCRIPT_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_SCRIPT_BYTES: u64 = 48 * 1024 * 1024;
+/// The scan reads this much at a time and keeps a short overlap so a constant cannot be cut in two.
+const SCAN_CHUNK_BYTES: usize = 1024 * 1024;
+const SCAN_OVERLAP_BYTES: usize = 600;
 const MAX_SCRIPTS: usize = 400;
 
 /// What the stored login file holds. No `Debug`: a stray `{:?}` must never print a token.
@@ -309,17 +312,44 @@ fn candidate_scripts(binary: &Path) -> Vec<PathBuf> {
     scripts
 }
 
+/// Streams a script in bounded chunks looking for the two constants, so a 17 MB minified bundle
+/// chunk is never held in memory whole (and a one-line file has no line-length problem).
+fn scan_for_client(mut reader: impl std::io::Read) -> Option<OAuthClient> {
+    let mut id = None;
+    let mut secret = None;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; SCAN_CHUNK_BYTES];
+    loop {
+        let read = reader.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        carry.extend_from_slice(&chunk[..read]);
+        let window = String::from_utf8_lossy(&carry);
+        id = id.or_else(|| extract_constant(&window, "OAUTH_CLIENT_ID"));
+        secret = secret.or_else(|| extract_constant(&window, "OAUTH_CLIENT_SECRET"));
+        if let (Some(id), Some(secret)) = (&id, &secret) {
+            return Some(OAuthClient {
+                id: id.clone(),
+                secret: secret.clone(),
+            });
+        }
+        let keep = carry.len().saturating_sub(SCAN_OVERLAP_BYTES);
+        carry.drain(..keep);
+    }
+}
+
 fn client_from_script(path: &Path) -> Option<OAuthClient> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > MAX_SCRIPT_BYTES {
         return None;
     }
-    let js = std::fs::read_to_string(path).ok()?;
-    Some(OAuthClient {
-        id: extract_constant(&js, "OAUTH_CLIENT_ID")?,
-        secret: extract_constant(&js, "OAUTH_CLIENT_SECRET")?,
-    })
+    scan_for_client(std::fs::File::open(path).ok()?)
 }
+
+/// The constants never change for an installed CLI, so a found pair is kept for the session.
+/// A miss is not cached, so installing or updating the CLI is picked up on the next try.
+static FOUND_CLIENT: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
 
 /// Env override, then an `oauth2.js` path override, then the installed CLI package.
 fn find_oauth_client() -> Option<OAuthClient> {
@@ -336,10 +366,18 @@ fn find_oauth_client() -> Option<OAuthClient> {
             return Some(client);
         }
     }
+    if let Some((id, secret)) = FOUND_CLIENT.get() {
+        return Some(OAuthClient {
+            id: id.clone(),
+            secret: secret.clone(),
+        });
+    }
     let binary = super::provider_access::find_binary("gemini")?;
-    candidate_scripts(&binary)
+    let client = candidate_scripts(&binary)
         .iter()
-        .find_map(|script| client_from_script(script))
+        .find_map(|script| client_from_script(script))?;
+    let _ = FOUND_CLIENT.set((client.id.clone(), client.secret.clone()));
+    Some(client)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -483,7 +521,12 @@ async fn run(creds: StoredCreds) -> Result<GeminiQuota, State> {
         }
     }
     let refresh = refresh_token.ok_or(State::SignInNeeded)?;
-    let oauth = find_oauth_client().ok_or(State::ClientNotFound)?;
+    // Reading the CLI's files is blocking work: keep it off the async workers.
+    let oauth = tokio::task::spawn_blocking(find_oauth_client)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(State::ClientNotFound)?;
     let token = refresh_access_token(&client, &oauth, &refresh).await?;
     read_quota(&client, &token).await
 }
@@ -660,6 +703,40 @@ mod tests {
             ("id-1", "secret-1")
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_client_script_bigger_than_the_old_cap_is_still_read() {
+        // Gemini CLI 0.68 keeps the constants in bundle chunks of about 17 MB.
+        let dir = std::env::temp_dir().join(format!("gemini-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chunk-big.js");
+        let mut body = vec![b'a'; 13 * 1024 * 1024];
+        body.extend_from_slice(
+            br#";var OAUTH_CLIENT_ID = "big-id"; var OAUTH_CLIENT_SECRET = "big-secret";"#,
+        );
+        std::fs::write(&path, &body).unwrap();
+        let client = client_from_script(&path).unwrap();
+        assert_eq!(
+            (client.id.as_str(), client.secret.as_str()),
+            ("big-id", "big-secret")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_constant_split_across_two_chunks_is_still_found() {
+        // Put the assignment right over the 1 MiB chunk boundary.
+        let mut body = vec![b' '; SCAN_CHUNK_BYTES - 20];
+        body.extend_from_slice(
+            br#"OAUTH_CLIENT_ID = "edge-id"; OAUTH_CLIENT_SECRET = "edge-secret";"#,
+        );
+        let client = scan_for_client(std::io::Cursor::new(body)).unwrap();
+        assert_eq!(
+            (client.id.as_str(), client.secret.as_str()),
+            ("edge-id", "edge-secret")
+        );
+        assert!(scan_for_client(std::io::Cursor::new(vec![b'x'; 3 * SCAN_CHUNK_BYTES])).is_none());
     }
 
     #[test]
