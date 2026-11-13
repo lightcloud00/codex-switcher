@@ -35,7 +35,7 @@ The main window has five views: **Overview** (Codex, Claude, API credits and cli
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Reset Countdowns** – The tray popup and the native tray menu show the time left until each window resets, for example `5h:73% ↻2h 5m`
 - **Provider Outage Badges** – A badge in the tray popup and a line in the native tray menu when OpenAI, Claude, Cursor, Factory or GitHub Copilot report an incident on their public status pages (see [Provider outage badges](#provider-outage-badges))
-- **Sign-In Expiry Alerts** – One local notification per provider when a login that was working stops working (see [Sign-in expiry alerts](#sign-in-expiry-alerts))
+- **Sign-In Expiry Alerts** – One local notification per provider when a login stops working (see [Sign-in expiry alerts](#sign-in-expiry-alerts))
 - **Gemini CLI Quota** – A card on the Providers view with the Gemini CLI's remaining quota per model tier (see [Gemini CLI quota](#gemini-cli-quota))
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
 - **Conversation Recovery** – Optionally continue quota-stopped chats and running macOS chats interrupted by account switching
@@ -76,7 +76,7 @@ this fork (see [Build from Source](#build-from-source)).
 
 #### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18+ to build the app; v22.6+ to run `pnpm test`, which uses `node --experimental-strip-types`)
+- [Node.js](https://nodejs.org/) (v20.19+ or v22.12+ to build the app (Vite 7); v22.6+ to run `pnpm test`, which uses `node --experimental-strip-types`)
 - [pnpm](https://pnpm.io/)
 - [Rust](https://rustup.rs/)
 
@@ -129,7 +129,7 @@ Optional environment variables:
 - `CODEX_SWITCHER_WEB_HOST` to override the bind host
 - `CODEX_SWITCHER_WEB_PORT` to override the port
 
-The browser dashboard serves the same UI through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely. It serves a subset of the desktop commands: account, usage, login, warm-up, Claude seat, provider-dates and backup routes are there. Window and tray commands, the display settings and monitoring switches, outage badges (`get_provider_status`), the Gemini quota card (`get_gemini_quota`), API credits, client status and the sign-in check are not served, so those parts need the desktop app. `codex-web` exits with status 1 and prints the error if it cannot bind the port.
+The browser dashboard serves the same UI through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely. It serves a subset of the desktop commands: account, usage, login, warm-up, Claude seat and provider-dates routes are there, plus the password-protected backup routes, which answer only a request that comes from the same machine (loopback with a `localhost` host). Window and tray commands, the display settings and monitoring switches, outage badges (`get_provider_status`), the Gemini quota card (`get_gemini_quota`), API credits, client status and the sign-in check are not served, so those parts need the desktop app. `codex-web` exits with status 1 and prints the error if it cannot bind the port.
 
 ## Usage and Reset Credits
 
@@ -243,10 +243,11 @@ Every few minutes the app reads the public Statuspage `status.json` of OpenAI, C
 
 ## Sign-in expiry alerts
 
-When a login that was working stops working, the app shows one local notification for that provider, for example "Codex sign-in expired", with a short fix (for example `Open Codex Switcher to sign in again.`). The alert names the provider only, never an email, account name, token or raw error.
+When a login stops working, the app shows one local notification for that provider, for example "Codex sign-in expired", with a short fix (for example `Open Codex Switcher to sign in again.` for Codex or `Run /login in Claude Code on the seat that signed out.` for Claude). The alert names the provider only, never an email, account name, token or raw error.
 
-- One alert per failure episode. The episode ends when a fresh, successful check for the account that failed comes back, so repeated refreshes do not repeat the alert. A provider that was already signed out when the app opened, a busy host, a rate limit or a network error never raises one.
-- It covers Codex accounts, the Grok and Cursor sign-in checks on the Providers view, and the Gemini CLI quota check.
+- One alert per provider (or per Claude seat) per failure episode. The episode ends when a fresh, successful check for the account that failed comes back, so repeated refreshes do not repeat the alert. A busy host, a rate limit or a network error never raises one.
+- Codex accounts alert on the first failing check that says the login is bad (a 401, `invalid_grant`, an expired or reused token), even if the app never saw that account working. The other sources alert only after they were seen working in this run, so one that was already signed out when the app opened stays silent.
+- It covers Codex accounts; Claude seats on this Mac, as reported by `claude-usage` (a seat must be confirmed signed in by two separate checks first; remote seats such as Windows or WSL and archived seats never alert, because `claude-usage` only reports sign-in state for local seats); the Grok, Cursor and CredVault sign-in checks on the Providers view; and the Gemini CLI quota check.
 - Episodes live in memory, so restarting the app starts clean.
 - On by default. Turn it off with **Settings → Notify me when a sign-in expires**.
 
@@ -311,7 +312,7 @@ pnpm version:major
 pnpm release patch
 
 # Prepare and push a release
-# The tag stores the release note for the in-app update prompt.
+# The tag stores the release note.
 pnpm release patch -- --push
 
 # For non-interactive use, pass the note explicitly.
