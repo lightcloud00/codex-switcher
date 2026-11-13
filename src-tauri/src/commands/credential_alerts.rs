@@ -237,13 +237,16 @@ struct ClaudeState {
 
 /// Probe refresh interval (10 minutes) plus slack.
 const ARM_AFTER: chrono::Duration = chrono::Duration::minutes(15);
+/// How far ahead of this machine's clock a summary time may be before it is ignored.
+const MAX_CLOCK_SKEW: chrono::Duration = chrono::Duration::minutes(5);
 
 impl ClaudeState {
     /// True when `generated` is older than a summary already applied. Concurrent fetches can finish
     /// out of order, and an older "signed in" must not end an episode a newer "signed out" started.
-    /// An unparseable timestamp is applied (nothing to compare).
-    fn is_stale(&mut self, generated: &str) -> bool {
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(generated) else {
+    /// No usable timestamp (unparseable, or dated in the future) means nothing to compare: the
+    /// summary is applied and the newest-time mark is left alone.
+    fn is_stale(&mut self, at: Option<chrono::DateTime<chrono::FixedOffset>>) -> bool {
+        let Some(at) = at else {
             return false;
         };
         match self.last {
@@ -286,6 +289,8 @@ impl ClaudeState {
                     Outcome::Other
                 }
             }
+            // A busy host or an unknown row neither confirms nor cancels: a pending first "signed
+            // in" survives it (and a summary that omits the seat), on purpose.
             Outcome::Other => Outcome::Other,
         }
     }
@@ -299,10 +304,31 @@ impl ClaudeState {
         hidden_labels: &HashSet<String>,
         generated: &str,
     ) -> Vec<String> {
-        if self.is_stale(generated) {
+        self.apply_at(
+            episodes,
+            accounts,
+            hidden_labels,
+            generated,
+            chrono::Utc::now().fixed_offset(),
+        )
+    }
+
+    fn apply_at(
+        &mut self,
+        episodes: &mut Episodes,
+        accounts: &[serde_json::Value],
+        hidden_labels: &HashSet<String>,
+        generated: &str,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Vec<String> {
+        // A summary dated well ahead of this clock (skew) is not trusted as a time: it would
+        // otherwise make every later, correctly dated summary look stale until the app restarts.
+        let at = chrono::DateTime::parse_from_rfc3339(generated)
+            .ok()
+            .filter(|t| *t <= now + MAX_CLOCK_SKEW);
+        if self.is_stale(at) {
             return Vec::new();
         }
-        let at = chrono::DateTime::parse_from_rfc3339(generated).ok();
         let mut alerts = Vec::new();
         for account in accounts {
             let Some(name) = account.get("account").and_then(serde_json::Value::as_str) else {
@@ -677,7 +703,12 @@ mod tests {
         accounts: Vec<serde_json::Value>,
         at: &str,
     ) -> Vec<String> {
-        state.apply(episodes, &accounts, &HashSet::new(), at)
+        state.apply_at(episodes, &accounts, &HashSet::new(), at, test_now())
+    }
+
+    /// Later than every timestamp the tests use, so none counts as "from the future".
+    fn test_now() -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap()
     }
 
     #[test]
@@ -832,9 +863,9 @@ mod tests {
         assert!(feed(&mut state, &mut episodes, vec![out("mac-main-max")], T5).is_empty());
         // Timestamps compare as times, not text: 09:00 in +05:00 is before 05:00Z.
         let mut s = ClaudeState::default();
-        assert!(!s.is_stale("2026-11-12T05:00:00Z"));
-        assert!(s.is_stale("2026-11-12T09:00:00+05:00"));
-        assert!(!s.is_stale("not a time"));
+        assert!(!s.is_stale(chrono::DateTime::parse_from_rfc3339("2026-11-12T05:00:00Z").ok()));
+        assert!(s.is_stale(chrono::DateTime::parse_from_rfc3339("2026-11-12T09:00:00+05:00").ok()));
+        assert!(!s.is_stale(None));
     }
 
     #[test]
@@ -859,6 +890,58 @@ mod tests {
         feed(&mut state, &mut episodes, unknown(), T1);
         feed(&mut state, &mut episodes, unknown(), T2);
         assert!(state.seen.is_empty() && state.pending.is_empty());
+    }
+
+    #[test]
+    fn exactly_15_minutes_between_the_two_signed_in_summaries_arms_a_seat() {
+        let seats = || vec![inn("mac-main-max")];
+        // 15:00 exactly arms (the gate is >=); one second less does not.
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:00:00Z");
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:15:00Z");
+        assert_eq!(
+            feed(
+                &mut state,
+                &mut episodes,
+                vec![out("mac-main-max")],
+                "2026-11-12T22:16:00Z"
+            ),
+            ["mac-main-max"]
+        );
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:00:00Z");
+        feed(&mut state, &mut episodes, seats(), "2026-11-12T22:14:59Z");
+        assert!(feed(
+            &mut state,
+            &mut episodes,
+            vec![out("mac-main-max")],
+            "2026-11-12T22:16:00Z"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn one_summary_dated_in_the_future_does_not_make_later_summaries_stale() {
+        let (mut state, mut episodes) = (ClaudeState::default(), Episodes::default());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-12T22:00:00Z").unwrap();
+        let seats = || vec![inn("mac-main-max")];
+        // A clock-skewed summary (a day ahead) is applied but its time is not trusted...
+        state.apply_at(
+            &mut episodes,
+            &seats(),
+            &HashSet::new(),
+            "2026-11-13T22:00:00Z",
+            now,
+        );
+        assert!(state.last.is_none());
+        // ...so a correctly dated summary a minute later is not stale, and one within the skew allowance counts.
+        let ok = |t: &str, st: &mut ClaudeState, ep: &mut Episodes| {
+            st.apply_at(ep, &seats(), &HashSet::new(), t, now)
+        };
+        ok("2026-11-12T22:01:00Z", &mut state, &mut episodes);
+        assert!(state.pending.contains_key("mac-main-max"));
+        ok("2026-11-12T22:04:00Z", &mut state, &mut episodes);
+        assert!(state.last.is_some());
     }
 
     #[test]
