@@ -21,6 +21,7 @@ import {
   resetCountdown,
   seatStatus,
   seatStatusLabel,
+  SEAT_SIGN_IN_REQUIRED,
   seatSubtitle,
   seatTitle,
   stateLabel,
@@ -921,4 +922,21 @@ test("hidden Claude seats stay removed through registry fallback and duplicate u
   }
   assert.ok(buildSeats([], accounts, null, NOW).some(seat => seat.id === "claude-windows"));
   assert.equal(accounts.length, 4);
+});
+
+
+test("cached structured sign-in failures survive aging without claiming present authentication", () => {
+  const usage = account("fixture-auth-history", 12, 12, {
+    signed_in: false,
+    login_error: "cached sign-in check failed",
+    probe_error: "usage output had no limit lines",
+  });
+  for (const now of [NOW, NOW + 7 * 86_400_000]) {
+    const result = buildSeats(null, [usage], null, now).find(s => s.id === usage.account)!;
+    assert.equal(result.status, "unknown");
+    assert.equal(result.signedIn, false);
+    assert.equal(result.loginError, usage.login_error);
+    assert.equal(SEAT_SIGN_IN_REQUIRED, "Sign-in check failed");
+  }
+  assert.equal(seatStatus(account("a", 12, 12, { signed_in: true })), "ok");
 });
