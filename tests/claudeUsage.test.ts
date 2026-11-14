@@ -697,6 +697,26 @@ test("Prometheus fills a seat that has no usage account at all", () => {
   assert.equal(windows?.sevenDay?.used_pct, 61);
 });
 
+test("Prometheus readings use the same 30-minute freshness boundary as local observations", () => {
+  const reading = (age_s: number, now = LIVE_NOW) => buildClaudeSeats(
+    registryFixture(),
+    [forgottenGustavo()],
+    prom({ "claude-mac-gustavo": promSeat({}, {
+      "7d": promWindow({ used_pct: 61, resets_at: "2026-11-04T19:59:00Z", age_s, known: true }),
+    }) }),
+    now,
+  )[0].sevenDay;
+
+  assert.equal(reading(1800)?.state, "current");
+  assert.equal(reading(1801)?.state, "stale");
+  assert.equal(reading(1801)?.used_pct, 61);
+  // Retaining a snapshot while the app is open does not freeze its freshness label.
+  assert.equal(reading(1800, LIVE_NOW + 1000)?.state, "stale");
+  assert.equal(reading(6 * 3600)?.state, "stale");
+  assert.equal(reading(6 * 3600)?.used_pct, 61);
+  assert.equal(reading(6 * 3600 + 1)?.used_pct, null);
+});
+
 test("Prometheus does not override a fresher usage reading, but replaces an older one", () => {
   const usage = liveGustavo(); // read 2 minutes before LIVE_NOW
   const olderProm = promSeat({}, {
@@ -872,3 +892,4 @@ test("hidden Claude seats stay removed through registry fallback and duplicate u
   assert.ok(buildSeats([], accounts, null, NOW).some(seat => seat.id === "claude-windows"));
   assert.equal(accounts.length, 4);
 });
+

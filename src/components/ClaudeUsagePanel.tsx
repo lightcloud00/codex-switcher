@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invokeBackend } from "../lib/platform";
+import { invokeBackend, openExternalUrl } from "../lib/platform";
 import { ClaudeAccountManager } from "./ClaudeAccountManager";
 import { BlurredText } from "./AccountCard";
 import { claudeSubscriptionText, withSeatSubscriptions, type SeatSubscriptions } from "../lib/claudeSubscription";
 import { planDatesText } from "../lib/overview";
 import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
+import { claudeWindowMetrics } from "../lib/claudeWindowMetrics";
 import type { PlanDates } from "../lib/providerAccess";
 import {
   buildClaudeSeats,
-  formatPct,
   formatTokens,
   hasLiveWindow,
   hostLabel,
   lastKnownLine,
-  limitBarNotes,
   noReadingLine,
   planLabel,
   SEAT_HEALTH_PROBLEM_STATES,
@@ -44,28 +43,30 @@ const TONE_BAR: Record<WindowTone, string> = {
 };
 
 function LimitBar({ label, w, now }: { label: string; w: ClaudeUsageWindow | null; now: number }) {
-  const pct = w?.used_pct ?? null;
+  const { usedPct: pct, remainingText, resetText, observationText } = claudeWindowMetrics(w, now);
   const badge = stateLabel(w);
-  // "resets in ..." goes with any window that still has a percentage (a stale 100% says when it comes
-  // back); a window that is not a current reading also says when it was last read.
-  const { countdown, lastRead } = limitBarNotes(w, now);
   return (
     <div className="space-y-1">
-      <div className="flex justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
-        <span>
-          {label}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span>{label}</span>
           {badge && (
-            <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">
               {badge}
             </span>
           )}
         </span>
-        <span>
-          <span className="font-medium text-gray-700 dark:text-gray-200">{formatPct(w)} used</span>
-          {countdown && ` • resets ${countdown}`}
-          {lastRead && ` • ${lastRead}`}
+        <span className="whitespace-nowrap">
+          <span className="font-medium text-gray-700 dark:text-gray-200">{pct === null ? "Usage unavailable" : `${Math.round(pct)}% used`}</span>
+          {remainingText && ` · ${remainingText}`}
         </span>
       </div>
+      <p className="text-[11px] leading-4 text-gray-600 dark:text-gray-300">{resetText}</p>
+      {observationText && (
+        <p className="text-[11px] leading-4 text-gray-400 dark:text-gray-500" title={w ? `Observed: ${w.observed_at} · Source: ${w.source}` : undefined}>
+          {observationText}
+        </p>
+      )}
       <div className="h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
         <div
           className={`h-full transition-all duration-300 ${TONE_BAR[windowTone(pct)]}`}
@@ -125,8 +126,9 @@ function SeatCard({
   const subtitle = seatSubtitle(seat);
   const plan = planLabel(seat.plan);
   const noUsage = seat.status === "no_usage_yet";
-  // An unknown seat with nothing to draw gets one honest line instead of two empty bars.
-  const noReading = seat.status === "unknown" && !hasLiveWindow(seat);
+  // Keep reported reset times visible even when the usage percentage is unavailable.
+  const hasResetDetails = [seat.fiveHour, seat.sevenDay].some(w => w?.resets_at && Number.isFinite(Date.parse(w.resets_at)));
+  const noReading = seat.status === "unknown" && !hasLiveWindow(seat) && !hasResetDetails;
   const lastKnown = noReading ? lastKnownLine(seat, now) : "";
   const showHealth = Boolean(seat.promState) && seat.promState !== "ok";
   return (
@@ -202,8 +204,8 @@ function SeatCard({
         </div>
       )}
       {modelWeeks.length > 0 && (
-        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          {modelWeeks.map(([label, w]) => `${label} week ${formatPct(w)}`).join(" · ")}
+        <div className="mt-3 space-y-3 border-t border-gray-100 pt-3 dark:border-gray-800">
+          {modelWeeks.map(([label, w]) => <LimitBar key={label} label={`${label} week`} w={w} now={now} />)}
         </div>
       )}
       {seat.probeError && (
@@ -221,6 +223,7 @@ function SeatCard({
 
 export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
   const [managing, setManaging] = useState(false);
+  const [usagePageError, setUsagePageError] = useState(false);
   const [summary, setSummary] = useState<ClaudeUsageSummary | null>(null);
   const [plans, setPlans] = useState<PlanDates[]>([]);
   const [seatFile, setSeatFile] = useState<SeatSubscriptions | null>(null);
@@ -282,10 +285,11 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
   const allSeats = useMemo(() => buildClaudeSeats(registry?.seats ?? [], summary?.accounts ?? [], prom, now), [registry, summary, prom, now]);
   const tokens = summary?.local_tokens;
   const workers = summary?.workers;
+  const failedRuns = (workers?.by_route ?? []).reduce((total, route) => total + (Number.isFinite(route.failed) ? route.failed : 0), 0);
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Claude seats</h2>
           {summary?.source_host === "mac" && <p className="text-xs text-gray-500">Fleet usage from Mac</p>}
@@ -304,6 +308,20 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
         >
           {loading ? "Refreshing..." : "Refresh"}
         </button></div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 p-3 dark:border-gray-800">
+        <div className="min-w-0 flex-1 basis-56">
+          <div className="text-xs font-medium text-gray-900 dark:text-gray-100">One-time resets</div>
+          <p className="mt-1 text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+            Check available offers and expiry in Claude Usage. Opens the account signed in to your browser.
+          </p>
+          {usagePageError && <p role="alert" className="mt-1 text-xs text-amber-600 dark:text-amber-400">Could not open Claude Usage. Visit claude.ai/settings/usage in your browser.</p>}
+        </div>
+        <button
+          onClick={() => { setUsagePageError(false); void openExternalUrl("https://claude.ai/settings/usage").catch(() => setUsagePageError(true)); }}
+          className="h-8 shrink-0 rounded-lg border border-gray-200 px-3 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-neutral-900"
+        >Open Claude usage</button>
       </div>
 
       {managing && <ClaudeAccountManager seats={allSeats} hidden={registry?.hidden_seat_ids ?? []} plans={plans} masked={masked} onChange={load} onClose={() => setManaging(false)} />}
@@ -344,8 +362,10 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
               <div className="rounded-2xl border border-gray-200 p-4 text-sm dark:border-gray-800">
                 <div className="mb-1 font-medium text-gray-900 dark:text-gray-100">Workers today (UTC)</div>
                 <div className="text-gray-600 dark:text-gray-300">
-                  {workers?.runs ?? 0} runs · ${(workers?.cost_usd ?? 0).toFixed(2)}
+                  {workers ? `${workers.runs ?? "—"} runs` : "Worker activity unavailable"}
+                  {workers && Number.isFinite(workers.cost_usd) ? ` · $${workers.cost_usd.toFixed(2)} recorded spend` : ""}
                   {workers?.held ? ` · ${workers.held} held` : ""}
+                  {failedRuns > 0 ? ` · ${failedRuns} failed` : ""}
                 </div>
                 {(workers?.by_route ?? []).map((r) => (
                   <div key={r.route} className="text-xs text-gray-500 dark:text-gray-400">
@@ -358,7 +378,7 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
               </div>
               <div className="rounded-2xl border border-gray-200 p-4 text-sm dark:border-gray-800">
                 <div className="mb-1 font-medium text-gray-900 dark:text-gray-100">Local tokens today (this Mac)</div>
-                {tokens?.total_tokens ? (
+                {tokens?.total_tokens != null ? (
                   <div className="text-gray-600 dark:text-gray-300">
                     {formatTokens(tokens.total_tokens)} total · {formatTokens(tokens.output_tokens)} output ·{" "}
                     {formatTokens(tokens.cache_read_tokens)} cache reads
@@ -387,3 +407,4 @@ export function ClaudeUsagePanel({ masked = false }: { masked?: boolean }) {
     </div>
   );
 }
+
