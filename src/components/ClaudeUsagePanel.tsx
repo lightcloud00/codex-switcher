@@ -125,6 +125,8 @@ function SeatCard({
   const subtitle = seatSubtitle(seat);
   const plan = planLabel(seat.plan);
   const noUsage = seat.status === "no_usage_yet";
+  const staleStatus = seat.status === "unknown"
+    && [seat.fiveHour, seat.sevenDay].some(w => w?.state === "stale");
   // An unknown seat with nothing to draw gets one honest line instead of two empty bars.
   const noReading = seat.status === "unknown" && !hasLiveWindow(seat);
   const lastKnown = noReading ? lastKnownLine(seat, now) : "";
@@ -151,8 +153,8 @@ function SeatCard({
             {plan && (
               <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${BADGE_NEUTRAL}`}>{plan}</span>
             )}
-            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_BADGE[seat.status]}`}>
-              {seat.promState === "broken" ? SEAT_NOT_WORKING : seatStatusLabel(seat.status)}
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${staleStatus ? BADGE_WARN : STATUS_BADGE[seat.status]}`}>
+              {seat.promState === "broken" ? SEAT_NOT_WORKING : seatStatusLabel(seat.status, staleStatus)}
             </span>
           </div>
           {(showHealth || seat.lockOrphaned) && (

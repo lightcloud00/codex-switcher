@@ -25,6 +25,9 @@ const REGISTRY_RELATIVE: &str =
 const SUMMARY_RELATIVE: &str = ".local/state/claude-usage/summary.json";
 /// A summary file older than this is not trusted for capacity (the CLI rewrites it on every run).
 const SUMMARY_MAX_AGE_HOURS: i64 = 6;
+/// A cached window is useful for capacity only while its own observation is recent.
+const WINDOW_MAX_AGE_MINUTES: i64 = 30;
+const WINDOW_MAX_FUTURE_SECONDS: i64 = 60;
 /// Known seats, usage labels and launchers; the Claude tab reads the same file (src/lib/claudeUsage.ts).
 const SEAT_TABLE: &str = include_str!("../../../src/lib/claudeSeatTable.json");
 
@@ -387,8 +390,8 @@ struct WindowReading {
     resets_at: Option<DateTime<Utc>>,
 }
 
-/// A window object from a usage account. A window whose reset has passed since the summary was
-/// written no longer has a usable percentage.
+/// A window object from a usage account. Percentages require a current, recent observation, and a
+/// window whose reset has passed no longer has a usable percentage. Reset metadata is retained.
 fn window_reading(window: Option<&Value>, now: DateTime<Utc>) -> Option<WindowReading> {
     let window = window.filter(|w| w.is_object())?;
     let resets_at = window
@@ -396,11 +399,22 @@ fn window_reading(window: Option<&Value>, now: DateTime<Utc>) -> Option<WindowRe
         .and_then(Value::as_str)
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
         .map(|time| time.with_timezone(&Utc));
+    let observed_at = window
+        .get("observed_at")
+        .and_then(Value::as_str)
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|time| time.with_timezone(&Utc));
+    let fresh = observed_at.is_some_and(|observed| {
+        observed >= now - ChronoDuration::minutes(WINDOW_MAX_AGE_MINUTES)
+            && observed <= now + ChronoDuration::seconds(WINDOW_MAX_FUTURE_SECONDS)
+    });
     let used_pct = window
         .get("used_pct")
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
         .map(|value| value.clamp(0.0, 100.0))
+        .filter(|_| window.get("state").and_then(Value::as_str) == Some("current"))
+        .filter(|_| fresh)
         .filter(|_| !resets_at.is_some_and(|reset| reset <= now));
     Some(WindowReading {
         used_pct,
@@ -638,7 +652,83 @@ mod tests {
     }
 
     fn window(used: Option<f64>, resets_at: &str) -> Value {
-        json!({ "used_pct": used, "resets_at": resets_at, "state": "current" })
+        json!({ "used_pct": used, "resets_at": resets_at, "state": "current", "observed_at": "2026-10-11T17:21:58Z" })
+    }
+
+    fn test_now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 11, 17, 22, 0).unwrap()
+    }
+
+    #[test]
+    fn fresh_current_window_percentage_is_preserved() {
+        let reading = window_reading(
+            Some(&json!({"used_pct": 42.0, "state": "current", "observed_at": "2026-10-11T17:21:58Z", "resets_at": "2026-10-11T19:00:00Z"})),
+            test_now(),
+        )
+        .unwrap();
+        assert_eq!(reading.used_pct, Some(42.0));
+    }
+
+    #[test]
+    fn current_observation_at_exact_age_boundary_is_accepted() {
+        let reading = window_reading(
+            Some(&json!({"used_pct": 42.0, "state": "current", "observed_at": "2026-10-11T16:52:00Z"})),
+            test_now(),
+        )
+        .unwrap();
+        assert_eq!(reading.used_pct, Some(42.0));
+    }
+
+    #[test]
+    fn cached_current_window_older_than_threshold_has_no_percentage() {
+        let reading = window_reading(
+            Some(&json!({"used_pct": 42.0, "state": "current", "observed_at": "2026-10-11T16:51:59Z"})),
+            test_now(),
+        )
+        .unwrap();
+        assert_eq!(reading.used_pct, None);
+    }
+
+    #[test]
+    fn stale_exhausted_and_low_percentages_are_both_unknown_but_reset_is_retained() {
+        for percentage in [100.0, 12.0] {
+            let reading = window_reading(
+                Some(&json!({"used_pct": percentage, "state": "current", "observed_at": "2026-10-11T16:00:00Z", "resets_at": "2026-10-11T19:00:00Z"})),
+                test_now(),
+            )
+            .unwrap();
+            assert_eq!(reading.used_pct, None);
+            assert_eq!(
+                reading.resets_at,
+                Some(Utc.with_ymd_and_hms(2026, 10, 11, 19, 0, 0).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_observed_at_cannot_supply_a_percentage() {
+        for window in [
+            json!({"used_pct": 42.0, "state": "current"}),
+            json!({"used_pct": 42.0, "state": "current", "observed_at": "not-a-time"}),
+        ] {
+            assert_eq!(
+                window_reading(Some(&window), test_now()).unwrap().used_pct,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn noncurrent_or_far_future_observation_cannot_supply_a_percentage() {
+        for window in [
+            json!({"used_pct": 42.0, "state": "stale", "observed_at": "2026-10-11T17:21:58Z"}),
+            json!({"used_pct": 42.0, "state": "current", "observed_at": "2026-10-11T17:23:01Z"}),
+        ] {
+            assert_eq!(
+                window_reading(Some(&window), test_now()).unwrap().used_pct,
+                None
+            );
+        }
     }
 
     fn account(label: &str, five: Option<f64>, seven: Option<f64>) -> Value {
@@ -883,8 +973,8 @@ mod tests {
                 "seven_day": {"used_pct": null, "last_used_pct": 40.0, "state": "reset",
                     "resets_at": "2026-10-13T03:10:00Z"}}),
             json!({"account": "mac-gustavo-max", "probe_error": null,
-                "five_hour": window(Some(9.0), "2026-10-30T12:30:00Z"),
-                "seven_day": window(Some(61.0), "2026-11-04T20:00:00Z")}),
+                "five_hour": {"used_pct": 9.0, "resets_at": "2026-10-30T12:30:00Z", "state": "current", "observed_at": "2026-10-30T12:20:00Z"},
+                "seven_day": {"used_pct": 61.0, "resets_at": "2026-11-04T20:00:00Z", "state": "current", "observed_at": "2026-10-30T12:20:00Z"}}),
             json!({"account": "mac-max", "five_hour": null, "seven_day": null,
                 "probe_error": "usage output had no limit lines"}),
         ]
@@ -900,6 +990,30 @@ mod tests {
         assert_eq!(gustavo.used_7d_pct, Some(61.0));
         assert_eq!(gustavo.status, SeatStatus::Ok);
         assert_eq!(gustavo.resets_at.as_deref(), Some("2026-11-04T20:00:00Z"));
+    }
+
+    #[test]
+    fn freshly_generated_summary_with_stale_windows_exports_unknown_and_keeps_future_reset() {
+        let now = test_now();
+        let summary = json!({
+            "schema": SCHEMA,
+            "generated_at": now.to_rfc3339(),
+            "accounts": [{
+                "account": "mac-gustavo-max",
+                "probe_error": null,
+                "five_hour": {"used_pct": 100.0, "state": "current", "observed_at": "2026-10-11T16:00:00Z", "resets_at": "2026-10-11T19:00:00Z"},
+                "seven_day": {"used_pct": 12.0, "state": "current", "observed_at": "2026-10-11T16:00:00Z", "resets_at": "2026-10-15T19:00:00Z"}
+            }]
+        });
+        let fresh_summary = parse_fresh_summary(&summary.to_string(), now)
+            .expect("the summary itself was just generated");
+        let accounts = fresh_summary["accounts"].as_array().unwrap();
+        let seats = merge_seats(Some(&registry()), Some(accounts), now);
+        let gustavo = reading(&seats, "claude-mac-gustavo");
+        assert_eq!(gustavo.used_5h_pct, None);
+        assert_eq!(gustavo.used_7d_pct, None);
+        assert_eq!(gustavo.status, SeatStatus::Unknown);
+        assert_eq!(gustavo.resets_at.as_deref(), Some("2026-10-15T19:00:00Z"));
     }
 
     #[test]

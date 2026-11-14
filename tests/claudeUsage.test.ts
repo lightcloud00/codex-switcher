@@ -303,9 +303,44 @@ test("seatStatus: no account is 'no usage yet'; a missing weekly reading is unkn
   assert.equal(seatStatus(reset), "unknown");
 });
 
+test("seatStatus never reports retained stale quota as current capacity", () => {
+  for (const used_pct of [10, 95, 100]) {
+    const reading = account("a", null, null, {
+      seven_day: win({ used_pct, state: "stale" }),
+      probe_error: "signed out: run /login for this seat",
+    });
+    assert.equal(seatStatus(reading), "unknown");
+    assert.equal(reading.seven_day?.used_pct, used_pct);
+  }
+  assert.equal(seatStatus(account("a", 100, null, {
+    five_hour: win({ used_pct: 100, state: "stale" }),
+  })), "unknown");
+  assert.equal(seatStatus(account("a", 100, 40, {
+    five_hour: win({ used_pct: 100, state: "stale" }),
+  })), "ok");
+  assert.equal(seatStatus(account("a", 100, null, {
+    seven_day: win({ used_pct: 20, state: "stale" }),
+  })), "exhausted");
+});
+
+test("a retained weekly limit becomes unknown when it ages without a successful refresh", () => {
+  const reading = account("mac-main-max", null, 100, {
+    probe_error: "signed out: run /login for this seat",
+  });
+  const seat = buildClaudeSeats([], [reading], null, NOW + 1_801_000)
+    .find(s => s.usageAccount === reading.account)!;
+  assert.equal(seat.status, "unknown");
+  assert.equal(seat.sevenDay?.state, "stale");
+  assert.equal(seat.sevenDay?.used_pct, 100);
+  assert.equal(seat.probeError, reading.probe_error);
+});
+
 test("seatStatusLabel, hostLabel, planLabel", () => {
   assert.equal(seatStatusLabel("no_usage_yet"), "Not used yet");
   assert.equal(seatStatusLabel("near_limit"), "Almost empty");
+  assert.equal(seatStatusLabel("unknown", true), "Stale");
+  assert.equal(seatStatusLabel("unknown"), "No reading");
+  assert.equal(seatStatusLabel("exhausted", true), "Empty");
   assert.equal(hostLabel("win"), "Windows");
   assert.equal(hostLabel("mac"), "Mac");
   assert.equal(hostLabel("wsl"), "WSL");
