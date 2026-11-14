@@ -24,6 +24,19 @@ import type { AccountWithUsage, ClaudeSeat, ClaudeUsageWindow, UsageInfo } from 
 
 // Local noon, so the date-only plan dates (read in the user's time zone) behave the same everywhere.
 const NOW = new Date(2026, 9, 30, 12, 0, 0).getTime();
+
+test("Claude Overview prioritizes authentication over retained quota", () => {
+  for (const state of ["current", "stale"] as const) {
+    const [row] = buildClaudeRows([seat({
+      sevenDay: week({ used_pct: 100, state }),
+      status: "exhausted",
+      probeError: "signed out: run /login for this seat",
+    })], [], NOW);
+    assert.equal(row.status, "Sign in required");
+    assert.equal(row.left, "Unknown");
+    assert.equal(row.resets, NONE);
+  }
+});
 const NOW_DATE = new Date(NOW);
 const inMs = (ms: number) => NOW + ms;
 const unix = (ms: number) => Math.floor(ms / 1000);

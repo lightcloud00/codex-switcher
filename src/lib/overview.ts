@@ -13,11 +13,13 @@ import { needsRelogin } from "./accountAuth.ts";
 import { balanceLine, statusLabel, type ApiCreditRow } from "./apiCredits.ts";
 import {
   buildClaudeSeats,
+  claudeAuthenticationRequired,
   limitBarNotes,
   planLabel,
   resetCountdown,
   SEAT_NOT_WORKING,
   SEAT_PLAN_ENDED,
+  SEAT_SIGN_IN_REQUIRED,
   seatStatusLabel,
   seatSubtitle,
   seatTitle,
@@ -233,7 +235,8 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
   return seats.map((seat) => {
     const dates = plans.find((p) => p.id === seat.id);
     const expired = planDatesExpired(dates, now) || Boolean(dates?.subscriptionExpiresOn && dateStatus(dates.subscriptionExpiresOn, now).startsWith("Date passed"));
-    const windows = [seat.fiveHour, seat.sevenDay].filter((w) => w?.used_pct != null);
+    const signInRequired = claudeAuthenticationRequired(seat.probeError);
+    const windows = signInRequired ? [] : [seat.fiveHour, seat.sevenDay].filter((w) => w?.used_pct != null);
     const current = windows.filter((w) => w?.state === "current");
     const usable = current.length ? current : windows;
     const limiting = usable.reduce<(typeof usable)[number] | null>(
@@ -257,8 +260,8 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
       left: seat.promState === "broken" ? NONE : used !== null && limiting?.state === "stale" ? `${left} (stale)` : used === null ? "Unknown" : stale && !exhaustedNow ? `${left} (partial)` : left,
       resets: (used !== null && limitBarNotes(limiting, nowMs).countdown) || NONE,
       renews: planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs),
-      status: expired ? SEAT_PLAN_ENDED : status,
-      tone: expired ? "bad" : tone,
+      status: signInRequired ? SEAT_SIGN_IN_REQUIRED : expired ? SEAT_PLAN_ENDED : status,
+      tone: signInRequired ? "warn" : expired ? "bad" : tone,
       inactive: isInactive(expired, seat.plan, used),
     };
   });

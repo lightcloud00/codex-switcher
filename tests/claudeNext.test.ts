@@ -18,6 +18,24 @@ const FORMAT = { locale: "en-US", timeZone: "America/New_York" };
 // Wed Nov 11 2026, 9:50 AM EST.
 const NOW = Date.parse("2026-11-11T14:50:00Z");
 
+test("Use next requires sign-in and withholds capacity and reset promises after an auth failure", () => {
+  for (const state of ["current", "stale"] as const) {
+    for (const used of [12, 100]) {
+      const signedOut = seat({
+        sevenDay: win(used, "2026-11-14T14:50:00Z", state),
+        status: used === 100 ? "exhausted" : "ok",
+        probeError: "signed out: run /login for this seat",
+      });
+      const row = claudeNextRow(signedOut, undefined, NOW);
+      assert.equal(row.badge.label, "Sign in required");
+      assert.equal(row.leftPercent, null);
+      assert.equal(row.backAt, null);
+      assert.deepEqual(row.resets, []);
+      assert.deepEqual(claudeResets(signedOut, NOW), []);
+    }
+  }
+});
+
 function win(used: number | null, resetsAt: string | null, state: ClaudeUsageWindow["state"] = "current", age_s = 60): ClaudeUsageWindow {
   return { used_pct: used, last_used_pct: used ?? 0, resets_at: resetsAt, observed_at: "2026-11-11T14:49:00Z", age_s, state, source: "usage" };
 }

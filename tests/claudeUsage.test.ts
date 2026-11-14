@@ -5,6 +5,7 @@ import {
   accountSubtitle,
   accountTitle,
   buildClaudeSeats as buildSeats,
+  claudeAuthenticationRequired,
   formatPct,
   formatTokens,
   hasLiveWindow,
@@ -301,6 +302,20 @@ test("seatStatus: no account is 'no usage yet'; a missing weekly reading is unkn
   assert.equal(seatStatus(account("a", 12, null)), "unknown");
   const reset = { ...account("a", null, null), seven_day: win({ used_pct: null, state: "reset" }) };
   assert.equal(seatStatus(reset), "unknown");
+});
+
+test("explicit authentication failures override retained current quota without changing generic errors", () => {
+  for (const error of ["signed out: run /login for this seat", "Not logged in", "Authentication required"]) {
+    assert.equal(claudeAuthenticationRequired(error), true);
+    for (const used of [12, 100]) {
+      assert.equal(seatStatus(account("a", used, used, { probe_error: error })), "unknown");
+    }
+  }
+  for (const error of [null, "claude timed out", "usage output had no limit lines", "rate limit exceeded"]) {
+    assert.equal(claudeAuthenticationRequired(error), false);
+    assert.equal(seatStatus(account("a", 12, 12, { probe_error: error })), "ok");
+    assert.equal(seatStatus(account("a", 100, 100, { probe_error: error })), "exhausted");
+  }
 });
 
 test("seatStatus never reports retained stale quota as current capacity", () => {

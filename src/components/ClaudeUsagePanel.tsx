@@ -8,6 +8,7 @@ import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
 import type { PlanDates } from "../lib/providerAccess";
 import {
   buildClaudeSeats,
+  claudeAuthenticationRequired,
   formatPct,
   formatTokens,
   hasLiveWindow,
@@ -18,6 +19,7 @@ import {
   planLabel,
   SEAT_HEALTH_PROBLEM_STATES,
   SEAT_NOT_WORKING,
+  SEAT_SIGN_IN_REQUIRED,
   seatStatusLabel,
   seatSubtitle,
   seatTitle,
@@ -125,6 +127,7 @@ function SeatCard({
   const subtitle = seatSubtitle(seat);
   const plan = planLabel(seat.plan);
   const noUsage = seat.status === "no_usage_yet";
+  const signInRequired = claudeAuthenticationRequired(seat.probeError);
   const staleStatus = seat.status === "unknown"
     && [seat.fiveHour, seat.sevenDay].some(w => w?.state === "stale");
   // An unknown seat with nothing to draw gets one honest line instead of two empty bars.
@@ -153,8 +156,8 @@ function SeatCard({
             {plan && (
               <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${BADGE_NEUTRAL}`}>{plan}</span>
             )}
-            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${staleStatus ? BADGE_WARN : STATUS_BADGE[seat.status]}`}>
-              {seat.promState === "broken" ? SEAT_NOT_WORKING : seatStatusLabel(seat.status, staleStatus)}
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${signInRequired || staleStatus ? BADGE_WARN : STATUS_BADGE[seat.status]}`}>
+              {signInRequired ? SEAT_SIGN_IN_REQUIRED : seat.promState === "broken" ? SEAT_NOT_WORKING : seatStatusLabel(seat.status, staleStatus)}
             </span>
           </div>
           {(showHealth || seat.lockOrphaned) && (
@@ -186,7 +189,9 @@ function SeatCard({
           ) : null}
         </div>
       </div>
-      {noUsage ? (
+      {signInRequired ? (
+        <p className="text-xs text-amber-600 dark:text-amber-400">Sign in to this Claude account to check its current limits.</p>
+      ) : noUsage ? (
         <div className="text-xs italic text-gray-500 dark:text-gray-400">
           {usageUnavailable
             ? "claude-usage did not answer, so this seat has no reading."
@@ -203,7 +208,7 @@ function SeatCard({
           <LimitBar label="Week" w={seat.sevenDay} now={now} />
         </div>
       )}
-      {modelWeeks.length > 0 && (
+      {!signInRequired && modelWeeks.length > 0 && (
         <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
           {modelWeeks.map(([label, w]) => `${label} week ${formatPct(w)}`).join(" · ")}
         </div>

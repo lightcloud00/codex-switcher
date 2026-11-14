@@ -422,10 +422,29 @@ fn window_reading(window: Option<&Value>, now: DateTime<Utc>) -> Option<WindowRe
     })
 }
 
+fn authentication_required(account: &Value) -> bool {
+    let message = account
+        .get("probe_error")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    [
+        "signed out",
+        "not logged in",
+        "not authenticated",
+        "authentication required",
+        "please log in",
+        "run /login",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
 fn has_reading(account: &Value, now: DateTime<Utc>) -> bool {
-    ["five_hour", "seven_day"]
-        .iter()
-        .any(|key| window_reading(account.get(*key), now).is_some_and(|w| w.used_pct.is_some()))
+    !authentication_required(account)
+        && ["five_hour", "seven_day"]
+            .iter()
+            .any(|key| window_reading(account.get(*key), now).is_some_and(|w| w.used_pct.is_some()))
 }
 
 /// When the seat's capacity next changes: the exhausted window's reset, otherwise the weekly reset.
@@ -521,8 +540,19 @@ pub fn merge_seats(
                 .copied()
                 .find(|a| has_reading(a, now))
                 .or_else(|| matches.first().copied());
-            let five = usage.and_then(|a| window_reading(a.get("five_hour"), now));
-            let seven = usage.and_then(|a| window_reading(a.get("seven_day"), now));
+            let sign_in_required = usage.is_some_and(authentication_required);
+            let read_window = |key| {
+                usage
+                    .and_then(|a| window_reading(a.get(key), now))
+                    .map(|mut reading| {
+                        if sign_in_required {
+                            reading.used_pct = None;
+                        }
+                        reading
+                    })
+            };
+            let five = read_window("five_hour");
+            let seven = read_window("seven_day");
             let status = match (accounts, usage) {
                 (None, _) => SeatStatus::Unknown,
                 (Some(_), None) => SeatStatus::NoUsageYet,
@@ -657,6 +687,41 @@ mod tests {
 
     fn test_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 11, 17, 22, 0).unwrap()
+    }
+
+    #[test]
+    fn authentication_failure_withholds_capacity_even_with_current_observations() {
+        for error in [
+            "signed out: run /login for this seat",
+            "Not logged in",
+            "Authentication required",
+        ] {
+            for percentage in [12.0, 100.0] {
+                let mut usage = account("mac-main-max", Some(percentage), Some(percentage));
+                usage["probe_error"] = json!(error);
+                let seats = merge_seats(Some(&registry()), Some(&[usage]), fixture_now());
+                let seat = reading(&seats, "claude-mac-main");
+                assert_eq!(seat.status, SeatStatus::Unknown);
+                assert_eq!(seat.used_5h_pct, None);
+                assert_eq!(seat.used_7d_pct, None);
+                assert!(seat.resets_at.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn generic_probe_errors_are_not_authentication_failures() {
+        for error in [
+            "claude timed out",
+            "usage output had no limit lines",
+            "rate limit exceeded",
+        ] {
+            let mut usage = account("mac-main-max", Some(12.0), Some(12.0));
+            usage["probe_error"] = json!(error);
+            assert!(!authentication_required(&usage));
+            let seats = merge_seats(Some(&registry()), Some(&[usage]), fixture_now());
+            assert_eq!(reading(&seats, "claude-mac-main").status, SeatStatus::Ok);
+        }
     }
 
     #[test]
