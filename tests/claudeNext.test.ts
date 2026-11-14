@@ -24,10 +24,12 @@ test("Use next requires sign-in and withholds capacity and reset promises after 
       const signedOut = seat({
         sevenDay: win(used, "2026-11-14T14:50:00Z", state),
         status: used === 100 ? "exhausted" : "ok",
-        probeError: "signed out: run /login for this seat",
+        probeError: "usage output had no limit lines",
+        signedIn: false,
+        loginError: "cached sign-in check failed",
       });
       const row = claudeNextRow(signedOut, undefined, NOW);
-      assert.equal(row.badge.label, "Sign in required");
+      assert.equal(row.badge.label, "Sign-in check failed");
       assert.equal(row.leftPercent, null);
       assert.equal(row.backAt, null);
       assert.deepEqual(row.resets, []);

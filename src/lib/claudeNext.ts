@@ -127,7 +127,7 @@ export function claudePlanEnd(
 
 /** Resets still ahead (or just due), soonest first, for every window that has a reading. */
 export function claudeResets(seat: ClaudeSeat, now: number, format: WhenFormat = {}): ClaudeNextReset[] {
-  if (claudeAuthenticationRequired(seat.probeError)) return [];
+  if (claudeAuthenticationRequired(seat.loginError ?? seat.probeError, seat.signedIn)) return [];
   return windowsOf(seat)
     .flatMap(([label, w]) => {
       const at = w && w.used_pct != null ? toMs(w.resets_at) : null;
@@ -138,7 +138,7 @@ export function claudeResets(seat: ClaudeSeat, now: number, format: WhenFormat =
 }
 
 function badgeFor(seat: ClaudeSeat, empty: boolean, ended: boolean, used: number | null): ClaudeNextRow["badge"] {
-  if (claudeAuthenticationRequired(seat.probeError)) return { label: SEAT_SIGN_IN_REQUIRED, tone: "warn" };
+  if (claudeAuthenticationRequired(seat.loginError ?? seat.probeError, seat.signedIn)) return { label: SEAT_SIGN_IN_REQUIRED, tone: "warn" };
   // A passed end date with no current reading: the seat is likely gone. A seat still being read keeps its
   // usage badge, and the plan line asks to check the date (a renewal the seat file has not caught up with).
   if (ended) return { label: SEAT_PLAN_ENDED, tone: "muted" };
@@ -157,7 +157,7 @@ function badgeFor(seat: ClaudeSeat, empty: boolean, ended: boolean, used: number
 
 /** One Use next row per seat: what is left, when each window resets, and when the plan ends. */
 export function claudeNextRow(seat: ClaudeSeat, dates: PlanDates | undefined, now: number, format: WhenFormat = {}): ClaudeNextRow {
-  const signInRequired = claudeAuthenticationRequired(seat.probeError);
+  const signInRequired = claudeAuthenticationRequired(seat.loginError ?? seat.probeError, seat.signedIn);
   const read = signInRequired ? [] : windowsOf(seat).flatMap(([, w]) => (w && w.used_pct != null ? [w] : []));
   const current = read.filter((w) => w.state === "current");
   const usable = current.length > 0 ? current : read;

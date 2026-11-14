@@ -127,7 +127,7 @@ function SeatCard({
   const subtitle = seatSubtitle(seat);
   const plan = planLabel(seat.plan);
   const noUsage = seat.status === "no_usage_yet";
-  const signInRequired = claudeAuthenticationRequired(seat.probeError);
+  const signInRequired = claudeAuthenticationRequired(seat.loginError ?? seat.probeError, seat.signedIn);
   const staleStatus = seat.status === "unknown"
     && [seat.fiveHour, seat.sevenDay].some(w => w?.state === "stale");
   // An unknown seat with nothing to draw gets one honest line instead of two empty bars.
@@ -190,7 +190,7 @@ function SeatCard({
         </div>
       </div>
       {signInRequired ? (
-        <p className="text-xs text-amber-600 dark:text-amber-400">Sign in to this Claude account to check its current limits.</p>
+        <p className="text-xs text-amber-600 dark:text-amber-400">The last usage check reported a sign-in problem. Current sign-in status and limits need verification.</p>
       ) : noUsage ? (
         <div className="text-xs italic text-gray-500 dark:text-gray-400">
           {usageUnavailable
