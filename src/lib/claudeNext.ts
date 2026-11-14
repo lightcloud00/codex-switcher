@@ -141,6 +141,11 @@ function badgeFor(seat: ClaudeSeat, empty: boolean, ended: boolean, used: number
   // usage badge, and the plan line asks to check the date (a renewal the seat file has not caught up with).
   if (ended) return { label: SEAT_PLAN_ENDED, tone: "muted" };
   if (seat.promState === "broken") return { label: SEAT_NOT_WORKING, tone: "bad" };
+  const readings = windowsOf(seat).flatMap(([, w]) => w?.used_pct != null ? [w] : []);
+  const stale = readings.some(w => w.state === "stale");
+  if (stale && (seat.status === "unknown" || !readings.some(w => w.state === "current"))) {
+    return { label: seatStatusLabel("unknown", true), tone: "warn" };
+  }
   if (empty || seat.status === "exhausted") return { label: seatStatusLabel("exhausted"), tone: "bad" };
   if (seat.status === "near_limit") return { label: seatStatusLabel("near_limit"), tone: "warn" };
   if (seat.status === "ok" && used !== null) return { label: seatStatusLabel("ok"), tone: "ok" };
@@ -155,7 +160,7 @@ export function claudeNextRow(seat: ClaudeSeat, dates: PlanDates | undefined, no
   const usable = current.length > 0 ? current : read;
   const used = usable.length > 0 ? Math.max(...usable.map((w) => w.used_pct as number)) : null;
   // Full is judged on the windows that count now, so an old 100% from a reset window cannot make the seat Empty.
-  const full = usable.filter((w) => (w.used_pct as number) >= 100);
+  const full = current.filter((w) => (w.used_pct as number) >= 100);
   const empty = full.length > 0 || seat.status === "exhausted";
   const fullResets = full.map((w) => toMs(w.resets_at));
   const backAt =

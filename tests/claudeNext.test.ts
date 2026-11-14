@@ -161,15 +161,27 @@ test("a near-limit seat read 14 hours ago keeps its week reset and says how old 
     NOW,
     FORMAT,
   );
-  assert.equal(row.badge.label, "Almost empty");
+  assert.equal(row.badge.label, "Stale");
   assert.equal(row.leftPercent, 1);
   assert.equal(row.oldReading, "14 hours ago");
   assert.equal(claudeRowLine(row, NOW, FORMAT), "Week resets in 5 hours 10 min, Wed 3 PM EST");
 });
 
+test("a stale exhausted seat keeps its reported reset without promising current capacity", () => {
+  const row = claudeNextRow(
+    seat({ status: "unknown", sevenDay: win(100, "2026-11-14T22:00:00Z", "stale", 90_000), lastReadAgeS: 90_000 }),
+    undefined, NOW, FORMAT,
+  );
+  assert.equal(row.badge.label, "Stale");
+  assert.equal(row.backAt, null);
+  assert.equal(row.resets[0].at, Date.parse("2026-11-14T22:00:00Z"));
+  assert.equal(row.leftPercent, 0);
+  assert.equal(row.oldReading, "1 day 1 hour ago");
+});
+
 test("an empty seat says when it is back, and the strip marks that day and its end date", () => {
   const row = claudeNextRow(
-    seat({ status: "exhausted", sevenDay: win(100, "2026-11-14T22:00:00Z", "stale", 90_000), lastReadAgeS: 90_000 }),
+    seat({ status: "exhausted", sevenDay: win(100, "2026-11-14T22:00:00Z") }),
     dates("claude-mac-main", { subscriptionExpiresOn: "2026-11-14" }),
     NOW,
     FORMAT,
