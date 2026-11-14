@@ -466,8 +466,13 @@ fn window_reading(window: Option<&Value>, now: DateTime<Utc>) -> Option<WindowRe
 }
 
 fn authentication_required(account: &Value) -> bool {
+    if account.get("signed_in").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
     let message = account
-        .get("probe_error")
+        .get("login_error")
+        .filter(|value| !value.is_null())
+        .or_else(|| account.get("probe_error"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_lowercase();
@@ -783,6 +788,20 @@ mod tests {
             assert!(!authentication_required(&usage));
             let seats = merge_seats(Some(&registry()), Some(&[usage]), fixture_now());
             assert_eq!(reading(&seats, "claude-mac-main").status, SeatStatus::Ok);
+        }
+    }
+
+    #[test]
+    fn cached_signed_out_flag_with_generic_error_cannot_supply_capacity() {
+        let mut usage = account("mac-main-max", Some(12.0), Some(12.0));
+        usage["probe_error"] = json!("usage output had no limit lines");
+        usage["signed_in"] = json!(false);
+        for now in [fixture_now(), fixture_now() + ChronoDuration::days(7)] {
+            let seats = merge_seats(Some(&registry()), Some(&[usage.clone()]), now);
+            let seat = reading(&seats, "claude-mac-main");
+            assert_eq!(seat.status, SeatStatus::Unknown);
+            assert_eq!(seat.used_5h_pct, None);
+            assert_eq!(seat.used_7d_pct, None);
         }
     }
 

@@ -30,9 +30,10 @@ test("Claude Overview prioritizes authentication over retained quota", () => {
     const [row] = buildClaudeRows([seat({
       sevenDay: week({ used_pct: 100, state }),
       status: "exhausted",
-      probeError: "signed out: run /login for this seat",
+      probeError: "usage output had no limit lines",
+      signedIn: false,
     })], [], NOW);
-    assert.equal(row.status, "Sign in required");
+    assert.equal(row.status, "Sign-in check failed");
     assert.equal(row.left, "Unknown");
     assert.equal(row.resets, NONE);
   }

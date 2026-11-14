@@ -235,7 +235,7 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
   return seats.map((seat) => {
     const dates = plans.find((p) => p.id === seat.id);
     const expired = planDatesExpired(dates, now) || Boolean(dates?.subscriptionExpiresOn && dateStatus(dates.subscriptionExpiresOn, now).startsWith("Date passed"));
-    const signInRequired = claudeAuthenticationRequired(seat.probeError);
+    const signInRequired = claudeAuthenticationRequired(seat.loginError ?? seat.probeError, seat.signedIn);
     const windows = signInRequired ? [] : [seat.fiveHour, seat.sevenDay].filter((w) => w?.used_pct != null);
     const current = windows.filter((w) => w?.state === "current");
     const usable = current.length ? current : windows;

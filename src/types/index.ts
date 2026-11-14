@@ -173,6 +173,9 @@ export interface ClaudeUsageAccount {
   model_weeks?: Record<string, ClaudeUsageWindow>;
   pool_spend_today_usd: number | null;
   probe_error?: string | null;
+  /** Cached probe result; the producer does not expose its authentication observation time. */
+  signed_in?: boolean | null;
+  login_error?: string | null;
 }
 
 export interface ClaudeWorkerRoute {
@@ -255,6 +258,9 @@ export interface ClaudeSeatRegistry {
 }
 
 export interface ClaudeSeat {
+  /** Cached sign-in evidence, not a claim about the account's current authentication. */
+  signedIn?: boolean | null;
+  loginError?: string | null;
   /** Registry seat id ("claude-mac-096"); the claude-usage account label in usage-only mode. */
   id: string;
   /** "mac", "win" or "wsl" when known. */
