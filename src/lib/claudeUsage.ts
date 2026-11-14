@@ -161,14 +161,15 @@ export const KNOWN_SEATS: readonly KnownSeat[] = seatTable.seats;
 
 /**
  * Seat health from one usage account's two limit windows (null = no usage account for the seat yet).
- * Exhausted: either window at 100%. Near limit: 7-day at 95% or more. Ok needs a 7-day reading.
+ * Only current windows establish capacity. Retained stale percentages remain available for display.
+ * Exhausted: either current window at 100%. Near limit and ok need a current 7-day reading.
  */
 export function seatStatus(
   usage: Pick<ClaudeUsageAccount, "five_hour" | "seven_day" | "probe_error"> | null | undefined,
 ): ClaudeSeatStatus {
   if (!usage) return "no_usage_yet";
-  const five = usage.five_hour?.used_pct ?? null;
-  const seven = usage.seven_day?.used_pct ?? null;
+  const five = usage.five_hour?.state === "current" ? usage.five_hour.used_pct : null;
+  const seven = usage.seven_day?.state === "current" ? usage.seven_day.used_pct : null;
   if ((five ?? 0) >= 100 || (seven ?? 0) >= 100) return "exhausted";
   if (seven !== null && seven >= NEAR_LIMIT_PCT) return "near_limit";
   if (seven !== null) return "ok";
@@ -187,7 +188,8 @@ const SEAT_STATUS_LABELS: Record<ClaudeSeatStatus, string> = {
 export const SEAT_NOT_WORKING = "Not working";
 export const SEAT_PLAN_ENDED = "Plan ended";
 
-export function seatStatusLabel(status: ClaudeSeatStatus): string {
+export function seatStatusLabel(status: ClaudeSeatStatus, hasStaleReading = false): string {
+  if (status === "unknown" && hasStaleReading) return "Stale";
   return SEAT_STATUS_LABELS[status];
 }
 
