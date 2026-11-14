@@ -159,6 +159,15 @@ interface KnownSeat {
 /** Seats the fleet runs today, from the table the capacity exporter shares. */
 export const KNOWN_SEATS: readonly KnownSeat[] = seatTable.seats;
 
+/** Explicit sign-in failures take precedence over any retained quota observation. */
+export function claudeAuthenticationRequired(error: string | null | undefined): boolean {
+  const message = error?.toLowerCase() ?? "";
+  return ["signed out", "not logged in", "not authenticated", "authentication required", "please log in", "run /login"]
+    .some(marker => message.includes(marker));
+}
+
+export const SEAT_SIGN_IN_REQUIRED = "Sign in required";
+
 /**
  * Seat health from one usage account's two limit windows (null = no usage account for the seat yet).
  * Only current windows establish capacity. Retained stale percentages remain available for display.
@@ -168,6 +177,7 @@ export function seatStatus(
   usage: Pick<ClaudeUsageAccount, "five_hour" | "seven_day" | "probe_error"> | null | undefined,
 ): ClaudeSeatStatus {
   if (!usage) return "no_usage_yet";
+  if (claudeAuthenticationRequired(usage.probe_error)) return "unknown";
   const five = usage.five_hour?.state === "current" ? usage.five_hour.used_pct : null;
   const seven = usage.seven_day?.state === "current" ? usage.seven_day.used_pct : null;
   if ((five ?? 0) >= 100 || (seven ?? 0) >= 100) return "exhausted";
@@ -238,7 +248,8 @@ export function planLabel(plan: string | null | undefined): string {
  */
 function pickUsage(matches: ClaudeUsageAccount[], labels: string[]): ClaudeUsageAccount | null {
   const hasReading = (a: ClaudeUsageAccount) =>
-    a.five_hour?.used_pct != null || a.seven_day?.used_pct != null;
+    !claudeAuthenticationRequired(a.probe_error)
+      && (a.five_hour?.used_pct != null || a.seven_day?.used_pct != null);
   const ranked = [...matches].sort((a, b) => labels.indexOf(a.account) - labels.indexOf(b.account));
   return ranked.find(hasReading) ?? ranked[0] ?? null;
 }
