@@ -58,6 +58,8 @@ function ago(seconds: number): string {
 
 /** Past this age a "reset" window is a forgotten reading, not a window that just rolled over. */
 const RESET_STALE_AFTER_S = 6 * 3600;
+/** Local and Prometheus observations use the same freshness label. */
+const READING_STALE_AFTER_S = 30 * 60;
 
 /** Seconds since the window was read, as of nowMs; falls back to the CLI's own age_s. */
 function windowAgeS(w: ClaudeUsageWindow | null | undefined, nowMs: number): number | null {
@@ -75,7 +77,7 @@ function windowAt(w: ClaudeUsageWindow | null, nowMs: number): ClaudeUsageWindow
   if (Number.isFinite(reset) && reset <= nowMs) {
     return { ...w, age_s, state: "reset", last_used_pct: w.used_pct ?? w.last_used_pct, used_pct: null };
   }
-  return { ...w, age_s, state: w.state === "current" && age_s > 1800 ? "stale" : w.state };
+  return { ...w, age_s, state: w.state === "current" && age_s > READING_STALE_AFTER_S ? "stale" : w.state };
 }
 
 /** Badge text for a window that is not a fresh reading; "" when current. */
@@ -324,7 +326,7 @@ function promWindowAsUsage(
     resets_at: w.resets_at,
     observed_at: new Date(nowMs - age * 1000).toISOString(),
     age_s: age,
-    state: "current",
+    state: age > READING_STALE_AFTER_S ? "stale" : "current",
     source: "prometheus",
   };
 }
@@ -534,3 +536,4 @@ export function buildClaudeSeats(
     return { ...withAge, unknownReason: merged.status === "unknown" ? unknownReason(withAge) : null };
   });
 }
+
