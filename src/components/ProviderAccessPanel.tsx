@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invokeBackend, isTauriRuntime, openExternalUrl } from "../lib/platform";
 import { CHECK_LIMITS_MS, failedCheckText, withTimeout } from "../lib/withTimeout.ts";
+import { GeminiQuotaCard } from "./GeminiQuotaCard";
 import { buildGrokRows } from "../lib/clientStatus";
 import { planDatesText } from "../lib/overview";
 import { dateChanged, hasUnsavedDates, mergeRefresh, pendingDateLabel, PLAN_LABELS, signInLabel, type PlanDates, type PlanView, type SignIn } from "../lib/providerAccess";
@@ -60,6 +61,7 @@ export function ProviderAccessPanel() {
       {p.id !== "credvault" && <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void openExternalUrl(DETAILS[p.id].url)}>Account</button>}
       <button className="rounded-lg border px-3 py-1.5 text-sm" onClick={() => void navigator.clipboard.writeText(DETAILS[p.id].command).then(() => setMessage("CLI command copied.")).catch(() => setError("Clipboard unavailable"))}>Copy CLI</button></div>
     </article>)}</div>
+    <GeminiQuotaCard />
     <div className="space-y-2" aria-label="Grok Bot accounts">
       <h3 className="font-semibold">Grok Bots</h3>
       <p className="text-xs text-gray-500">Bot and computer associations: Fleet Atlas, verified October 30, 2026. These are cloud bots, separate from the Grok CLI. Account identity, sign-in, plan, reset and renewal require a current account check.</p>

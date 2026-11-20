@@ -342,8 +342,19 @@ pub async fn get_provider_access() -> Result<serde_json::Value, String> {
 /// The read-only sign-in probes, kept apart from `get_provider_access` so a slow CLI never blocks
 /// the tab. Desktop only: the LAN web route does not expose it, so no CLI runs for LAN callers.
 #[tauri::command]
-pub async fn check_provider_sign_in() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "providers": provider_rows(true).await }))
+pub async fn check_provider_sign_in(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let rows = provider_rows(true).await;
+    // A fresh "no" (never a failed or unrecognised probe) starts one local sign-in alert.
+    for row in &rows {
+        if let (Some(id), Some(label), Some(signed_in)) = (
+            row["id"].as_str(),
+            row["label"].as_str(),
+            row["signedIn"].as_str(),
+        ) {
+            super::credential_alerts::observe_probe(&app, id, label, signed_in);
+        }
+    }
+    Ok(serde_json::json!({ "providers": rows }))
 }
 static DATE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn write_dates(plans: &[PlanDates]) -> Result<(), String> {

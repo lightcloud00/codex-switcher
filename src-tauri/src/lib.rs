@@ -20,14 +20,15 @@ use commands::{
     delete_account, export_accounts_full_encrypted_file, export_accounts_slim_text,
     get_account_reset_credits, get_account_usage_stats, get_active_account_info, get_api_credits,
     get_claude_prometheus, get_claude_seat_subscriptions, get_claude_seats, get_claude_usage,
-    get_client_status, get_dock_display_mode, get_masked_account_ids, get_provider_access,
-    get_usage, get_use_next_plan, hide_tray_window, import_accounts_full_encrypted_file,
-    import_accounts_slim_text, kill_codex_processes, launch_provider, list_accounts,
-    open_codex_recovery_conversation, open_login_url, open_main_window,
-    prepare_codex_session_recovery, quit_app, refresh_account_metadata, refresh_all_accounts_usage,
-    rename_account, report_usage, report_use_next, resume_codex_session_recovery,
-    save_provider_dates, set_auto_warmup_config, set_dock_display_mode, set_masked_account_ids,
-    start_login, switch_account, warmup_account, warmup_all_accounts,
+    get_client_status, get_dock_display_mode, get_gemini_quota, get_masked_account_ids,
+    get_provider_access, get_provider_status, get_usage, get_use_next_plan, hide_tray_window,
+    import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
+    launch_provider, list_accounts, open_codex_recovery_conversation, open_login_url,
+    open_main_window, prepare_codex_session_recovery, quit_app, refresh_account_metadata,
+    refresh_all_accounts_usage, rename_account, report_usage, report_use_next,
+    resume_codex_session_recovery, save_provider_dates, set_auto_warmup_config,
+    set_dock_display_mode, set_masked_account_ids, set_monitoring_setting, start_login,
+    switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
 
@@ -37,6 +38,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
             {
@@ -102,6 +104,9 @@ pub fn run() {
             commands::update_provider_plan,
             get_claude_prometheus,
             get_provider_access,
+            get_provider_status,
+            get_gemini_quota,
+            set_monitoring_setting,
             get_api_credits,
             get_client_status,
             get_use_next_plan,
