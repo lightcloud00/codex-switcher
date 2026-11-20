@@ -1,0 +1,22 @@
+{
+  "failures": [
+    "API error: 401 Unauthorized",
+    "Token refresh failed: invalid_grant",
+    "refresh_token_reused",
+    "refresh_token_expired",
+    "token_revoked",
+    "token_invalidated",
+    "missing refresh token",
+    "HTTP 401"
+  ],
+  "others": [
+    "API error: 403 Forbidden",
+    "API error: 429 Too Many Requests",
+    "API error: 500 Internal Server Error",
+    "error sending request: connection reset",
+    "Usage info not available for API key accounts",
+    "Failed to parse usage response",
+    "port 14010 busy",
+    ""
+  ]
+}

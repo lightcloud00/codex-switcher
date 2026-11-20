@@ -55,13 +55,13 @@ pub async fn fetch_usage(account_id: &str) -> Result<UsageInfo, String> {
 /// Get usage info for a specific account
 #[tauri::command]
 pub async fn get_usage(app: tauri::AppHandle, account_id: String) -> Result<UsageInfo, String> {
-    let usage = fetch_usage(&account_id).await?;
+    let result = fetch_usage(&account_id).await;
+    super::credential_alerts::observe_codex_usage(&app, &account_id, &result);
+    let usage = result?;
 
     // Keep the tray menu/title in sync with whichever UI fetched fresh usage.
     #[cfg(desktop)]
     crate::tray::ingest_usage(&app, vec![usage.clone()]);
-    #[cfg(not(desktop))]
-    let _ = app;
 
     Ok(usage)
 }
