@@ -1,4 +1,5 @@
 import type { UsageInfo } from "../types";
+import { formatUsageError } from "../lib/usageError";
 
 interface UsageBarProps {
   usage?: UsageInfo;
@@ -108,9 +109,11 @@ export function UsageBar({ usage, loading, hideError }: UsageBarProps) {
 
   if (usage.error) {
     if (hideError) return null;
+    const { title, message } = formatUsageError(usage.error);
     return (
-      <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
-        {usage.error}
+      <div className="py-1 text-xs text-gray-500 dark:text-gray-400" role="status">
+        <div className="font-medium text-gray-700 dark:text-gray-300">{title}</div>
+        <div>{message}</div>
       </div>
     );
   }

@@ -2,12 +2,14 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
-    import_from_auth_json, import_from_auth_json_contents, live_auth_may_hold_account,
-    load_accounts, read_current_auth, reconcile_active_account_with_live_auth, remove_account,
-    save_accounts, set_active_account, switch_to_account, sync_active_account_tokens,
-    touch_account, AUTH_OPERATION_LOCK,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts, read_current_auth,
+    reconcile_active_account_with_live_auth, remove_account, save_accounts, set_active_account,
+    switch_to_account, sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    parse_chatgpt_id_token_claims, AccountInfo, AccountsStore, AuthData, AuthDotJson,
+    ImportAccountsSummary, StoredAccount,
+};
 
 use super::process::ensure_codex_not_running;
 
@@ -25,12 +27,6 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const SLIM_EXPORT_PREFIX: &str = "css1.";
 const SLIM_FORMAT_VERSION: u8 = 1;
@@ -175,6 +171,40 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
     switch_account_by_id(&account_id).await
 }
 
+/// A checked active account is a no-op only when the live auth really belongs
+/// to it. A workspace ID alone does not identify a ChatGPT user, so require
+/// matching emails when available (or exactly the same ID token otherwise).
+fn live_auth_matches_account(account: &StoredAccount, live: &AuthDotJson) -> bool {
+    match &account.auth_data {
+        AuthData::ApiKey { key } => {
+            live.tokens.is_none() && live.openai_api_key.as_deref() == Some(key.as_str())
+        }
+        AuthData::ChatGPT {
+            id_token,
+            account_id,
+            ..
+        } => {
+            let Some(tokens) = live.tokens.as_ref() else {
+                return false;
+            };
+            if live.openai_api_key.is_some() {
+                return false;
+            }
+            let stored = parse_chatgpt_id_token_claims(id_token);
+            let current = parse_chatgpt_id_token_claims(&tokens.id_token);
+            let stored_id = stored.account_id.as_ref().or(account_id.as_ref());
+            let current_id = current.account_id.as_ref().or(tokens.account_id.as_ref());
+            if stored_id.is_none() || stored_id != current_id {
+                return false;
+            }
+            match (stored.email.as_ref(), current.email.as_ref()) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => id_token == &tokens.id_token,
+            }
+        }
+    }
+}
+
 pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     let mut store = load_accounts().map_err(|e| e.to_string())?;
@@ -185,20 +215,38 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
         .position(|account| account.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    // Already active only counts when auth.json really holds that account.
-    // Another tool may have changed it; then fall through and rewrite it.
-    if store.active_account_id.as_deref() == Some(account_id)
-        && auth_file_holds_account(&store.accounts[target_index])
-    {
-        return Ok(());
+    // Healthy active account clicks (including native tray clicks) must stay a
+    // no-op. Read auth before process checks: no write, process interruption,
+    // token refresh or last-used update is needed when it already matches.
+    let already_active = store.active_account_id.as_deref() == Some(account_id);
+    let live_auth = read_current_auth().map_err(|e| e.to_string())?;
+    if already_active {
+        if let Some(auth) = live_auth.as_ref() {
+            if live_auth_matches_account(&store.accounts[target_index], auth) {
+                // Codex may have rotated tokens for the same authenticated user.
+                if sync_active_account_tokens(&mut store, auth) {
+                    save_accounts(&store).map_err(|e| e.to_string())?;
+                }
+                return Ok(());
+            }
+        }
     }
 
+    // Tests must never inspect or terminate a developer's real Codex process.
+    #[cfg(not(test))]
     ensure_codex_not_running()?;
 
     // ChatGPT rotates single-use refresh tokens. Preserve the latest token
     // before replacing auth.json, otherwise switching back restores a stale one.
-    if let Some(auth) = read_current_auth().map_err(|e| e.to_string())? {
-        if sync_active_account_tokens(&mut store, &auth) {
+    // Never import a different user's tokens solely because of a shared team
+    // workspace ID. A mismatched active account must take the repair path.
+    if let Some(auth) = live_auth.as_ref() {
+        let can_sync = store
+            .active_account_id
+            .as_deref()
+            .and_then(|id| store.accounts.iter().find(|account| account.id == id))
+            .is_some_and(|account| live_auth_matches_account(account, auth));
+        if can_sync && sync_active_account_tokens(&mut store, auth) {
             save_accounts(&store).map_err(|e| e.to_string())?;
         }
     }
@@ -210,44 +258,36 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // Write to ~/.codex/auth.json
     switch_to_account(&account).map_err(|e| e.to_string())?;
 
-    // Update the active account in our store
-    set_active_account(account_id).map_err(|e| e.to_string())?;
+    // A repeated switch repairs auth.json without changing the active ID.
+    if !already_active {
+        set_active_account(account_id).map_err(|e| e.to_string())?;
+    }
 
     // Update last_used_at
     touch_account(account_id).map_err(|e| e.to_string())?;
 
-    // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
+    // Restart only positively identified IDE app-server helpers after switching.
+    // Never terminate an interactive Codex CLI process, on either platform.
+    #[cfg(all(unix, not(test)))]
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(pid.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .output();
-            }
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output();
+        }
+    }
+    #[cfg(all(windows, not(test)))]
+    if let Ok(pids) = super::process::find_windows_ide_codex_helper_pids() {
+        for pid in pids {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID"])
+                .arg(pid.to_string())
+                .output();
         }
     }
 
     Ok(())
-}
-
-/// Read-only: does ~/.codex/auth.json exist and hold this account?
-fn auth_file_holds_account(account: &StoredAccount) -> bool {
-    let Ok(Some(auth)) = read_current_auth() else {
-        return false;
-    };
-    match &account.auth_data {
-        AuthData::ApiKey { key } => auth.openai_api_key.as_deref() == Some(key.as_str()),
-        AuthData::ChatGPT { .. } => live_auth_may_hold_account(account, &auth),
-    }
 }
 
 /// Remove an account
@@ -350,7 +390,8 @@ pub async fn import_accounts_full_encrypted_bytes(
     Ok(summary)
 }
 
-/// Find all running Antigravity codex assistant processes
+/// Find positively identified Antigravity codex assistant processes on Unix.
+#[cfg(unix)]
 fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
     let mut pids = Vec::new();
 
@@ -379,31 +420,6 @@ fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
                         || command.contains("/codex app-server"));
 
                 if is_antigravity {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // Use tasklist on Windows
-        // For Windows we might need a more precise WMI query to get command line args,
-        // but for now we look for codex.exe PIDs and verify they're not ours
-        let output = std::process::Command::new("tasklist")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() > 1 {
-                let name = parts[0].trim_matches('"').to_lowercase();
-                if name == "codex.exe" {
-                    let pid_str = parts[1].trim_matches('"');
                     if let Ok(pid) = pid_str.parse::<u32>() {
                         pids.push(pid);
                     }
@@ -952,27 +968,158 @@ mod backup_protection_tests {
 }
 
 #[cfg(test)]
-mod active_auth_file_tests {
-    use super::*;
-    use crate::auth::test_support::TestHome;
+mod active_account_repair_tests {
+    use super::{live_auth_matches_account, switch_account_by_id};
+    use crate::auth::{get_codex_auth_file, load_accounts, read_current_auth, save_accounts};
+    use crate::types::{AccountsStore, StoredAccount};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn healthy_active_account_click_preserves_auth_file_without_restarting_anything() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let account = StoredAccount::new_api_key("Active".into(), "sk-live".into());
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let path = get_codex_auth_file().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let unchanged = r#"{"OPENAI_API_KEY":"sk-live","unrelated_extension_setting":"keep"}"#;
+        std::fs::write(&path, unchanged).unwrap();
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), unchanged);
+        let stored = load_accounts().unwrap();
+        assert_eq!(stored.accounts[0].last_used_at, None);
+    }
 
     #[test]
-    fn active_account_needs_auth_file_to_hold_it() {
-        let _home = TestHome::new();
-        let a = StoredAccount::new_api_key("A".into(), "key-a".into());
-        let b = StoredAccount::new_api_key("B".into(), "key-b".into());
+    fn same_team_workspace_does_not_mean_same_chatgpt_user() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
-        // auth.json missing: not held, so a switch must rewrite it.
-        assert!(!auth_file_holds_account(&a));
+        let jwt = |email: &str| {
+            let payload = serde_json::json!({
+                "email": email,
+                "https://api.openai.com/auth": { "chatgpt_account_id": "shared-team" }
+            });
+            format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD.encode(payload.to_string())
+            )
+        };
+        let original = jwt("alice@example.com");
+        let account = StoredAccount::new_chatgpt(
+            "Alice".into(),
+            None,
+            None,
+            None,
+            original.clone(),
+            "access".into(),
+            "refresh".into(),
+            Some("shared-team".into()),
+        );
+        let other = serde_json::from_value(serde_json::json!({
+            "tokens": {
+                "id_token": jwt("bob@example.com"),
+                "access_token": "other-access",
+                "refresh_token": "other-refresh",
+                "account_id": "shared-team"
+            }
+        }))
+        .unwrap();
+        assert!(!live_auth_matches_account(&account, &other));
 
-        // auth.json holds B (another tool changed it): A is not held.
-        switch_to_account(&b).unwrap();
-        assert!(!auth_file_holds_account(&a));
-        assert!(auth_file_holds_account(&b));
+        let rotated = serde_json::from_value(serde_json::json!({
+            "tokens": {
+                "id_token": jwt("alice@example.com"),
+                "access_token": "rotated-access",
+                "refresh_token": "rotated-refresh",
+                "account_id": "shared-team"
+            }
+        }))
+        .unwrap();
+        assert!(live_auth_matches_account(&account, &rotated));
+    }
 
-        // Falling through to the normal switch path rewrites it to A.
-        switch_to_account(&a).unwrap();
-        assert!(auth_file_holds_account(&a));
-        assert!(!auth_file_holds_account(&b));
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_switch_restores_missing_auth_for_already_active_account() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let account = StoredAccount::new_api_key("Active".into(), "sk-test".into());
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!get_codex_auth_file().unwrap().exists());
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        let live = read_current_auth().unwrap().unwrap();
+        assert_eq!(live.openai_api_key.as_deref(), Some("sk-test"));
+        assert_eq!(
+            load_accounts().unwrap().active_account_id.as_deref(),
+            Some(account.id.as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_switch_restores_missing_chatgpt_auth_for_active_account() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let _home = crate::auth::test_support::TestHome::new();
+        let expiry = chrono::Utc::now().timestamp() + 24 * 60 * 60;
+        let jwt = format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expiry}}}"#))
+        );
+        let account = StoredAccount::new_chatgpt(
+            "Active ChatGPT".into(),
+            None,
+            None,
+            None,
+            jwt.clone(),
+            jwt.clone(),
+            "refresh".into(),
+            Some("workspace".into()),
+        );
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!get_codex_auth_file().unwrap().exists());
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        let live = read_current_auth().unwrap().unwrap();
+        let tokens = live.tokens.unwrap();
+        assert_eq!(tokens.account_id.as_deref(), Some("workspace"));
+        assert_eq!(tokens.access_token, jwt);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_switch_replaces_stale_active_auth_file() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let account = StoredAccount::new_api_key("Active".into(), "sk-current".into());
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let auth_path = get_codex_auth_file().unwrap();
+        std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+        std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"sk-old"}"#).unwrap();
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        let live = read_current_auth().unwrap().unwrap();
+        assert_eq!(live.openai_api_key.as_deref(), Some("sk-current"));
     }
 }
