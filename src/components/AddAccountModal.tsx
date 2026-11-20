@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import {
   describeFileSource,
   isTauriRuntime,
-  openExternalUrl,
+  openLoginUrl,
   pickAuthJsonFile,
   type FileSource,
 } from "../lib/platform";
+import { loginEmailFor, openedNote } from "../lib/loginBrowser";
 
 import type { AccountInfo } from "../types";
 
@@ -38,6 +39,7 @@ export function AddAccountModal({
   const [oauthPending, setOauthPending] = useState(false);
   const [authUrl, setAuthUrl] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
+  const [openNote, setOpenNote] = useState<string>("");
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
   const tauriRuntime = isTauriRuntime();
   const requestId = useRef(0);
@@ -50,6 +52,14 @@ export function AddAccountModal({
     setLoading(false);
     setOauthPending(false);
     setAuthUrl("");
+    setOpenNote("");
+  };
+
+  const openSignInPage = (url: string, currentRequest: number) => {
+    const email = loginEmailFor(reloginAccount, name);
+    void openLoginUrl(url, email).then((opened) => {
+      if (currentRequest === requestId.current) setOpenNote(openedNote(opened, email));
+    });
   };
 
   const handleClose = async () => {
@@ -79,6 +89,9 @@ export function AddAccountModal({
       setAuthUrl(info.auth_url);
       setOauthPending(true);
       setLoading(false);
+      // Open it straight away in the right Chrome profile, so the browser's
+      // existing ChatGPT login cannot sign in a different account.
+      openSignInPage(info.auth_url, currentRequest);
       await onCompleteOAuth();
       if (currentRequest !== requestId.current) return;
       resetForm();
@@ -187,7 +200,8 @@ export function AddAccountModal({
                   <div className="animate-spin h-8 w-8 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mx-auto mb-3"></div>
                   <p className="text-gray-700 dark:text-gray-300 font-medium mb-2">Waiting for browser login...</p>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-                    Please open the following link in your browser to proceed:
+                    Sign in on the page that opened. Wrong account? Copy this link into
+                    the Chrome profile for the account you want.
                   </p>
                   <div className="flex items-center gap-2 mb-2 bg-gray-50 dark:bg-gray-800 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
                     <input
@@ -218,13 +232,16 @@ export function AddAccountModal({
                     </button>
                     <button
                       onClick={() => {
-                        void openExternalUrl(authUrl);
+                        openSignInPage(authUrl, requestId.current);
                       }}
                       className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 border border-gray-900 dark:border-gray-100 rounded text-xs font-medium text-white dark:text-gray-900 transition-colors shrink-0"
                     >
                       Open
                     </button>
                   </div>
+                  {openNote && (
+                    <p className="text-xs text-gray-600 dark:text-gray-300 mb-2">{openNote}</p>
+                  )}
                   {!tauriRuntime && (
                     <p className="text-xs text-amber-600">
                       OAuth login must finish on the same host machine because the callback

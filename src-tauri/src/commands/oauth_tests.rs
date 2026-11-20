@@ -463,3 +463,44 @@ fn relogin_of_the_account_live_auth_holds_adopts_it_before_renewing() {
     };
     assert_eq!(refresh_token, "renewed-held-refresh");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn adding_a_login_that_is_already_saved_names_it_and_changes_nothing() {
+    let _lock = OAUTH_TEST_LOCK.lock().await;
+    let _home = TestHome::new();
+    let mut saved = account("main");
+    saved.email = Some("main@example.test".into());
+    save_accounts(&AccountsStore {
+        accounts: vec![saved.clone()],
+        ..AccountsStore::default()
+    })
+    .unwrap();
+    let before = fs::read(get_accounts_file().unwrap()).unwrap();
+
+    // The browser was still signed in to "main", so the new entry is "main" again.
+    let mut again = account("main");
+    again.name = "lakes@example.test".into();
+    again.email = Some("main@example.test".into());
+    complete_with(Ok(OAuthLoginResult { account: again }));
+    let err = complete_login().await.unwrap_err();
+    assert!(err.contains("You signed in as main@example.test"), "{err}");
+    assert!(err.contains("already saved as \"main\""), "{err}");
+    assert_eq!(fs::read(get_accounts_file().unwrap()).unwrap(), before);
+}
+
+#[test]
+fn wrong_account_relogin_says_who_signed_in_and_who_was_expected() {
+    let mut old = account("renew");
+    old.email = Some("want@example.test".into());
+    let mut wrong = account("other");
+    wrong.email = Some("got@example.test".into());
+    let err = validate_relogin_identity(&old, &wrong).unwrap_err();
+    assert!(err.contains("You signed in as got@example.test"), "{err}");
+    assert!(err.contains("this account is want@example.test"), "{err}");
+    assert!(err.contains("does not match"), "{err}");
+    let mut unnamed = account("other");
+    unnamed.email = None;
+    assert!(validate_relogin_identity(&old, &unnamed)
+        .unwrap_err()
+        .contains("You signed in as another account"));
+}
