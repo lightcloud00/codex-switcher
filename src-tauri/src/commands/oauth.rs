@@ -10,7 +10,8 @@ use crate::auth::{
     save_accounts, switch_to_account, AUTH_OPERATION_LOCK,
 };
 use crate::types::{
-    parse_chatgpt_id_token_claims, AccountInfo, AuthData, OAuthLoginInfo, StoredAccount,
+    parse_chatgpt_id_token_claims, AccountInfo, AccountsStore, AuthData, OAuthLoginInfo,
+    StoredAccount,
 };
 
 struct PendingOAuth {
@@ -67,8 +68,43 @@ fn ensure_active_relogin_safe() -> Result<(), String> {
     })
 }
 
+/// The email a fresh login reports, for messages; never a token.
+fn login_email(account: &StoredAccount) -> String {
+    account
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .unwrap_or("another account")
+        .to_string()
+}
+
 /// Match both the user and workspace; workspace IDs alone can be shared by a team.
 fn validate_relogin_identity(old: &StoredAccount, new: &StoredAccount) -> Result<(), String> {
+    if !matches!(
+        (&old.auth_data, &new.auth_data),
+        (AuthData::ChatGPT { .. }, AuthData::ChatGPT { .. })
+    ) {
+        return Err("Only ChatGPT accounts support re-login".into());
+    }
+    if same_login(old, new) {
+        return Ok(());
+    }
+    let wanted = old.email.as_deref().unwrap_or(old.name.as_str());
+    if login_email(new).eq_ignore_ascii_case(wanted.trim()) {
+        return Err(format!(
+            "You signed in as {wanted}, but in a different workspace. The login does not match this account and workspace. Sign in again and pick the same workspace as before."
+        ));
+    }
+    Err(format!(
+        "You signed in as {}, but this account is {wanted}. The login does not match this account and workspace. Sign in again from the switcher: it opens the Chrome profile for {wanted}.",
+        login_email(new)
+    ))
+}
+
+/// Whether two saved logins are the same user in the same workspace. Missing
+/// identity never matches, so callers stay cautious.
+fn same_login(old: &StoredAccount, new: &StoredAccount) -> bool {
     let (
         AuthData::ChatGPT {
             id_token: old_token,
@@ -82,7 +118,7 @@ fn validate_relogin_identity(old: &StoredAccount, new: &StoredAccount) -> Result
         },
     ) = (&old.auth_data, &new.auth_data)
     else {
-        return Err("Only ChatGPT accounts support re-login".into());
+        return false;
     };
     let old_claims = parse_chatgpt_id_token_claims(old_token);
     let new_claims = parse_chatgpt_id_token_claims(new_token);
@@ -100,11 +136,20 @@ fn validate_relogin_identity(old: &StoredAccount, new: &StoredAccount) -> Result
             _ => false,
         },
     };
-    if !same_user || old_workspace.is_none_or(|id| id.is_empty()) || old_workspace != new_workspace
-    {
-        return Err("Login does not match this account and workspace. Sign in with the original account and select the same workspace.".into());
+    same_user && old_workspace.is_some_and(|id| !id.is_empty()) && old_workspace == new_workspace
+}
+
+/// Adding a login that is already saved would only duplicate it; this happens
+/// when the browser was already signed in to that account.
+fn reject_duplicate_login(store: &AccountsStore, new: &StoredAccount) -> Result<(), String> {
+    match store.accounts.iter().find(|saved| same_login(saved, new)) {
+        Some(saved) => Err(format!(
+            "You signed in as {}, which is already saved as \"{}\". To add a different account, sign in with that account's email (the switcher opens its Chrome profile) or paste the link into a private window.",
+            login_email(new),
+            saved.name
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn save_relogin(id: &str, new: StoredAccount) -> Result<StoredAccount, String> {
@@ -179,6 +224,7 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
         let stored = if let Some(id) = reauth_account_id {
             save_relogin(&id, account)?
         } else {
+            reject_duplicate_login(&load_accounts().map_err(|e| e.to_string())?, &account)?;
             add_account(account).map_err(|e| e.to_string())?
         };
         let store = load_accounts().map_err(|e| e.to_string())?;

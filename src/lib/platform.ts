@@ -43,6 +43,25 @@ export async function openExternalUrl(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+/**
+ * Open the ChatGPT sign-in link in the Chrome profile for `email` (or a private
+ * window). Falls back to the default browser and returns null when that fails.
+ */
+export async function openLoginUrl(
+  url: string,
+  email: string | null
+): Promise<import("./loginBrowser").LoginBrowserOpened | null> {
+  try {
+    return await invokeBackend<import("./loginBrowser").LoginBrowserOpened>("open_login_url", {
+      url,
+      email,
+    });
+  } catch {
+    await openExternalUrl(url);
+    return null;
+  }
+}
+
 export async function pickAuthJsonFile(): Promise<FileSource | null> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");

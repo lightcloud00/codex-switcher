@@ -22,10 +22,11 @@ use commands::{
     get_dock_display_mode, get_masked_account_ids, get_provider_access, get_usage,
     get_use_next_plan, hide_tray_window, import_accounts_full_encrypted_file,
     import_accounts_slim_text, kill_codex_processes, launch_provider, list_accounts,
-    open_codex_recovery_conversation, open_main_window, prepare_codex_session_recovery, quit_app,
-    refresh_account_metadata, refresh_all_accounts_usage, rename_account, report_usage,
-    report_use_next, resume_codex_session_recovery, save_provider_dates, set_dock_display_mode,
-    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
+    open_codex_recovery_conversation, open_login_url, open_main_window,
+    prepare_codex_session_recovery, quit_app, refresh_account_metadata, refresh_all_accounts_usage,
+    rename_account, report_usage, report_use_next, resume_codex_session_recovery,
+    save_provider_dates, set_dock_display_mode, set_masked_account_ids, start_login,
+    switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
 
@@ -89,6 +90,7 @@ pub fn run() {
             start_login,
             complete_login,
             cancel_login,
+            open_login_url,
             // Usage
             get_usage,
             get_claude_usage,

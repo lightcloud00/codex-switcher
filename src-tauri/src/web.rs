@@ -15,9 +15,9 @@ use crate::commands::{
     fetch_claude_seat_subscriptions, fetch_claude_seats, fetch_claude_usage, fetch_usage,
     get_account_usage_stats, get_active_account_info, get_masked_account_ids, get_provider_access,
     get_use_next_plan, import_accounts_full_encrypted_bytes, kill_codex_processes, list_accounts,
-    refresh_account_metadata, refresh_all_accounts_usage, rename_account, save_provider_dates,
-    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
-    BackupUnlock, PlanDates,
+    open_login_url, refresh_account_metadata, refresh_all_accounts_usage, rename_account,
+    save_provider_dates, set_masked_account_ids, start_login, switch_account, warmup_account,
+    warmup_all_accounts, BackupUnlock, PlanDates,
 };
 use crate::types::UsageInfo;
 
@@ -257,6 +257,16 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         }
         "complete_login" => to_json(complete_login().await?),
         "cancel_login" => to_json(cancel_login().await?),
+        "open_login_url" => {
+            #[derive(Deserialize)]
+            struct Args {
+                url: String,
+                #[serde(default)]
+                email: Option<String>,
+            }
+            let args: Args = parse_args(payload)?;
+            to_json(open_login_url(args.url, args.email).await?)
+        }
         "export_accounts_full_encrypted_bytes" => {
             #[derive(Deserialize)]
             struct Args {
