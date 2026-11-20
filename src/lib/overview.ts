@@ -5,6 +5,7 @@ import type {
   ClaudeSeat,
   ClaudeSeatRegistry,
   ClaudeSeatStatus,
+  ClaudeUsageAccount,
   ClaudeUsageSummary,
   UsageInfo,
 } from "../types";
@@ -14,6 +15,7 @@ import { balanceLine, statusLabel, type ApiCreditRow } from "./apiCredits.ts";
 import {
   buildClaudeSeats,
   claudeAuthenticationRequired,
+  KNOWN_SEATS,
   limitBarNotes,
   planLabel,
   resetCountdown,
@@ -57,6 +59,35 @@ export interface OverviewRow {
   tone: OverviewTone;
   /** Expired, or free with nothing left: sorts last in its section and renders muted. */
   inactive: boolean;
+  /**
+   * Subscriptions only: a paid plan that is still running (or was at its last known date). The
+   * Overview splits Subscriptions into "Paying now" and "Free or ended" on this flag.
+   */
+  paying?: boolean;
+}
+
+/** Overview status words, kept in one place so the badge reads the same everywhere. */
+export const SIGN_IN_AGAIN = "sign in again";
+export const CODEX_EMPTY = "Empty";
+
+const CODEX_PLAN_NAMES: Record<string, string> = {
+  promax: "Pro Max",
+  pro_max: "Pro Max",
+  "pro-max": "Pro Max",
+  pro: "Pro",
+  plus: "Plus",
+  free: "Free",
+  team: "Team",
+  business: "Business",
+  enterprise: "Enterprise",
+  edu: "Edu",
+};
+
+/** "Pro Max" for "promax"; known ChatGPT plan words get their real names, others are capitalised. */
+export function codexPlanLabel(plan: string | null | undefined): string {
+  const key = plan?.trim().toLowerCase();
+  if (!key) return "";
+  return CODEX_PLAN_NAMES[key] ?? planLabel(plan);
 }
 
 /** Used percent in, percent left out (clamped to 0-100); null without a reading. */
@@ -144,6 +175,48 @@ function isFree(plan: string | null | undefined): boolean {
   return plan?.trim().toLowerCase() === "free";
 }
 
+function isPaidPlan(plan: string | null | undefined): boolean {
+  const key = plan?.trim().toLowerCase();
+  return Boolean(key) && key !== "free" && key !== "api_key" && key !== "unknown";
+}
+
+function shortDate(ms: number): string {
+  return new Intl.DateTimeFormat(undefined, SUBSCRIPTION_DATE).format(new Date(ms));
+}
+
+/**
+ * The Codex row's plan line in plain words: "Paid until Dec 6, 2026", "Ended Oct 1, 2026", "Free plan",
+ * or, when only the date saved at the last good sign-in is known, the same words marked "(last known)".
+ * A free plan never shows a paid date, even if an old one is still saved.
+ */
+export function codexPlanText(
+  account: Pick<AccountWithUsage, "plan_type" | "auth_mode" | "subscription_expires_at" | "last_known_subscription_expires_at">,
+  nowMs: number,
+): string {
+  if (account.auth_mode === "api_key") return "API key · billed by usage";
+  if (isFree(account.plan_type)) return "Free plan";
+  const live = account.subscription_expires_at ? Date.parse(account.subscription_expires_at) : NaN;
+  if (!Number.isNaN(live)) return live <= nowMs ? `Ended ${shortDate(live)}` : `Paid until ${shortDate(live)}`;
+  const known = account.last_known_subscription_expires_at ? Date.parse(account.last_known_subscription_expires_at) : NaN;
+  if (!Number.isNaN(known)) {
+    return known <= nowMs ? `Ended ${shortDate(known)} (last known)` : `Paid until ${shortDate(known)} (last known)`;
+  }
+  return isPaidPlan(account.plan_type) ? "Paid plan · end date not known yet" : NONE;
+}
+
+/**
+ * Still paying for this Codex account: a paid plan whose live end date (or, without one, the date saved at
+ * the last good sign-in) has not passed. A paid plan with no date at all counts as paying.
+ */
+export function isCodexPaying(
+  account: Pick<AccountWithUsage, "plan_type" | "auth_mode" | "subscription_expires_at" | "last_known_subscription_expires_at">,
+  nowMs: number,
+): boolean {
+  if (account.auth_mode === "api_key" || !isPaidPlan(account.plan_type)) return false;
+  const end = account.subscription_expires_at ?? account.last_known_subscription_expires_at ?? null;
+  return !isSubscriptionExpired(end, nowMs);
+}
+
 /** Expired, or a free plan with nothing left. */
 function isInactive(expired: boolean, plan: string | null | undefined, usedPct: number | null): boolean {
   return expired || (isFree(plan) && percentLeft(usedPct) === 0);
@@ -170,13 +243,16 @@ function unixResetText(resetsAt: number | null | undefined, nowMs: number): stri
   return (Number.isNaN(date.getTime()) ? "" : resetCountdown(date.toISOString(), nowMs)) || NONE;
 }
 
-/** Expired wins; then a login only a fresh sign-in can fix; any other usage error is not called a broken login. */
+/**
+ * Expired wins; then a login only a fresh sign-in can fix ("sign in again"); any other usage error is not
+ * called a signed-out login. A window at 100% reads "Empty", the same word the Claude rows use.
+ */
 function codexStatus(expired: boolean, error: string | null | undefined, window: TightestWindow | null, stale: boolean): Pick<OverviewRow, "status" | "tone"> {
   if (expired) return { status: "expired", tone: "bad" };
-  if (error) return needsRelogin(error) ? { status: "login broken", tone: "bad" } : { status: "usage error", tone: "warn" };
+  if (error) return needsRelogin(error) ? { status: SIGN_IN_AGAIN, tone: "bad" } : { status: "usage error", tone: "warn" };
   if (!window) return { status: "usage unknown", tone: "muted" };
   if (stale) return { status: "usage stale", tone: "warn" };
-  if (window.used >= 100) return { status: "exhausted", tone: "bad" };
+  if (window.used >= 100) return { status: CODEX_EMPTY, tone: "bad" };
   return { status: "available", tone: "ok" };
 }
 
@@ -189,7 +265,8 @@ export function buildCodexRows(accounts: AccountWithUsage[], nowMs: number): Ove
     const stale = Boolean(window) && (!Number.isFinite(a.usageCheckedAt) || nowMs - a.usageCheckedAt! > 5 * 60_000
       || (window!.resetsAt !== null && window!.resetsAt * 1000 <= nowMs));
     const email = a.email?.trim();
-    const plan = a.plan_type ? planLabel(a.plan_type) : a.auth_mode === "api_key" ? "API Key" : "Unknown";
+    const plan = a.plan_type ? codexPlanLabel(a.plan_type) : a.auth_mode === "api_key" ? "API Key" : "Unknown";
+    const signedOut = Boolean(error) && needsRelogin(error);
     return {
       id: `codex:${a.id}`,
       account: email || a.name,
@@ -200,9 +277,10 @@ export function buildCodexRows(accounts: AccountWithUsage[], nowMs: number): Ove
       left: `${leftText(window?.used)}${stale ? " (stale)" : ""}`,
       // An ended plan has no next reset to count down to.
       resets: window && !expired ? unixResetText(window.resetsAt, nowMs) : NONE,
-      renews: codexExpiryText(a.subscription_expires_at, nowMs),
+      renews: `${codexPlanText(a, nowMs)}${signedOut ? " · sign in again on the Codex tab" : ""}`,
       ...codexStatus(expired, error, window, stale),
       inactive: isInactive(expired, a.plan_type, window?.used ?? null),
+      paying: isCodexPaying(a, nowMs),
     };
   });
 }
@@ -234,7 +312,11 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
   const now = new Date(nowMs);
   return seats.map((seat) => {
     const dates = plans.find((p) => p.id === seat.id);
-    const expired = planDatesExpired(dates, now) || Boolean(dates?.subscriptionExpiresOn && dateStatus(dates.subscriptionExpiresOn, now).startsWith("Date passed"));
+    const keyOrCreditExpired = planDatesExpired(dates, now);
+    const planEndPassed = Boolean(dates?.subscriptionExpiresOn && dateStatus(dates.subscriptionExpiresOn, now).startsWith("Date passed"));
+    const recordedEnded = keyOrCreditExpired || planEndPassed;
+    // The plan runs through its recorded end day (local time).
+    const planEndMs = dates?.subscriptionExpiresOn ? Date.parse(`${dates.subscriptionExpiresOn}T23:59:59`) : NaN;
     const signInRequired = claudeAuthenticationRequired(seat.loginError ?? seat.probeError, seat.signedIn);
     const windows = signInRequired ? [] : [seat.fiveHour, seat.sevenDay].filter((w) => w?.used_pct != null);
     const current = windows.filter((w) => w?.state === "current");
@@ -246,12 +328,21 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
     const used = limiting?.used_pct ?? null;
     const stale = windows.some(w => w?.state !== "current");
     const exhaustedNow = current.some(w => w!.used_pct! >= 100);
+    // A passed plan end date is wrong when the seat still answered after that day: a current reading observed
+    // after the end proves the plan runs. A reading from before the end proves nothing, and a passed key or
+    // credit expiry is a different thing that this never overrides.
+    const stillWorking = planEndPassed && !keyOrCreditExpired && Number.isFinite(planEndMs)
+      && current.some((w) => Date.parse(w!.observed_at) > planEndMs);
+    const expired = recordedEnded && !stillWorking;
     // Same short words as Use next (seatStatusLabel); a broken seat or an ended plan says so first.
     const broken = seat.promState === "broken";
     const status = broken ? SEAT_NOT_WORKING : exhaustedNow ? seatStatusLabel("exhausted") : stale ? "Stale" : used === null ? seatStatusLabel(seat.status === "no_usage_yet" ? "no_usage_yet" : "unknown") : seatStatusLabel(seat.status);
     const tone: OverviewTone = broken ? "bad" : exhaustedNow ? "bad" : stale ? "warn" : used === null ? "muted" : SEAT_TONE[seat.status];
-    const plan = planLabel(seat.plan);
+    // A login with no paid billing is a free Claude account, whatever plan the seat was set up for.
+    const freeLogin = seat.billingType === "none";
+    const plan = freeLogin ? "Free" : planLabel(seat.plan);
     const left = leftText(used);
+    const renewsText = planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs);
     return {
       id: `claude:${seat.id}`,
       account: seatTitle(seat),
@@ -259,10 +350,11 @@ export function buildClaudeRows(seats: ClaudeSeat[], plans: PlanDates[], nowMs: 
       type: plan ? `Claude ${plan}` : "Claude",
       left: seat.promState === "broken" ? NONE : used !== null && limiting?.state === "stale" ? `${left} (stale)` : used === null ? "Unknown" : stale && !exhaustedNow ? `${left} (partial)` : left,
       resets: (used !== null && limitBarNotes(limiting, nowMs).countdown) || NONE,
-      renews: planDatesText(dates, now) || claudeSubscriptionText(seat, nowMs),
+      renews: stillWorking ? "Still working · the recorded end date has passed and needs updating" : renewsText,
       status: signInRequired ? SEAT_SIGN_IN_REQUIRED : expired ? SEAT_PLAN_ENDED : status,
       tone: signInRequired ? "warn" : expired ? "bad" : tone,
-      inactive: isInactive(expired, seat.plan, used),
+      inactive: isInactive(expired, freeLogin ? "free" : seat.plan, used),
+      paying: !expired && !freeLogin && isPaidPlan(seat.plan),
     };
   });
 }
@@ -299,4 +391,35 @@ export function buildApiCreditRows(providers: ApiCreditRow[], plans: PlanDates[]
 /** Inactive rows last; every other row keeps its order. */
 export function sortOverviewRows(rows: OverviewRow[]): OverviewRow[] {
   return [...rows].sort((a, b) => Number(a.inactive) - Number(b.inactive));
+}
+
+/** A Claude login the Claude tab hides (a retired seat), listed on the Overview so no account is forgotten. */
+export interface HiddenClaudeLogin {
+  seatId: string;
+  email: string | null;
+  /** "Ended Nov 10, 2026" from the seat's recorded end date, or null when none is recorded. */
+  ended: string | null;
+}
+
+/**
+ * The hidden Claude seats with their email (from claude-usage, joined through the registry's usage account or the
+ * known seat table) and the recorded end date. Display only.
+ */
+export function hiddenClaudeLogins(
+  registry: ClaudeSeatRegistry | null | undefined,
+  accounts: ClaudeUsageAccount[],
+  plans: PlanDates[],
+  nowMs: number,
+): HiddenClaudeLogin[] {
+  const hidden = registry?.hidden_seat_ids ?? [];
+  return hidden.map((seatId) => {
+    const entry = registry?.seats.find((s) => s.id === seatId);
+    const known = KNOWN_SEATS.find((k) => k.id === seatId);
+    const labels = [entry?.usage_account, seatId, ...(known?.usage_labels ?? [])].filter(Boolean) as string[];
+    const usage = labels.map((label) => accounts.find((a) => a.account === label)).find(Boolean);
+    const end = plans.find((p) => p.id === seatId)?.subscriptionExpiresOn;
+    const endMs = end ? Date.parse(`${end}T23:59:59`) : NaN;
+    const ended = Number.isNaN(endMs) ? null : endMs <= nowMs ? `Ended ${shortDate(endMs)}` : `Paid until ${shortDate(endMs)}`;
+    return { seatId, email: usage?.email?.trim() || null, ended };
+  });
 }
