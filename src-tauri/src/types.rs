@@ -358,8 +358,8 @@ pub struct AccountInfo {
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub subscription_expires_at: Option<DateTime<Utc>>,
-    /// The paid-until date saved at the last successful sign-in or metadata refresh. Shown only as
-    /// "last known" (for example while a login is signed out), never as live account metadata.
+    /// The paid-until date saved from the ID token at the last sign-in or token refresh. Shown only as
+    /// "last known" while a login is signed out, never as live account metadata.
     #[serde(default)]
     pub last_known_subscription_expires_at: Option<DateTime<Utc>>,
     pub auth_mode: AuthMode,

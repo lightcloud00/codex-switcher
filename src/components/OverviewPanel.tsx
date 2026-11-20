@@ -281,13 +281,15 @@ export function OverviewPanel({
             {hiddenLogins.map((login) => (
               <li key={login.seatId} className="flex min-w-0 flex-wrap justify-between gap-x-3">
                 <span className="break-all">
-                  <BlurredText blur={masked}>{login.email ?? login.seatId}</BlurredText>
-                  <span className="ml-1 text-gray-400">({login.seatId})</span>
+                  {login.email
+                    ? <BlurredText blur={masked}>{login.email}</BlurredText>
+                    : <span className="italic">email unknown ({login.seatId})</span>}
+                  {login.where && <span className="ml-1 text-gray-400">· {login.where}</span>}
                 </span>
                 <span>{login.ended ?? "no end date recorded"}</span>
               </li>
             ))}
-            <li className="pt-1 text-gray-400">Set up on this Mac but hidden on the Claude tab because the plan was canceled.</li>
+            <li className="pt-1 text-gray-400">Claude logins you set up before, hidden on the Claude tab because their plans were canceled.</li>
           </ul>
         </section>
       )}
