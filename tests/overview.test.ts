@@ -9,6 +9,13 @@ import {
   buildCodexRows,
   claudeSeatsFromSources,
   codexExpiryText,
+  codexPlanLabel,
+  codexPlanText,
+  claudePlanEndText,
+  CODEX_EMPTY,
+  hiddenClaudeLogins,
+  isCodexPaying,
+  SIGN_IN_AGAIN,
   isCodexAccountInactive,
   isSubscriptionExpired,
   leftText,
@@ -201,7 +208,9 @@ test("a Codex row carries email, plan, percent left, reset, expiry and an active
   assert.equal(r.type, "Codex Pro");
   assert.equal(r.left, "62%");
   assert.equal(r.resets, "in 1h 18m");
-  assert.equal(r.renews, codexExpiryText("2026-12-04T00:00:00Z", NOW));
+  assert.equal(r.renews, codexPlanText(account({ usage: usage() }), NOW));
+  assert.match(r.renews, /^Paid until /);
+  assert.equal(r.paying, true);
   assert.equal(r.status, "available");
   assert.equal(r.tone, "ok");
   assert.equal(r.inactive, false);
@@ -258,8 +267,8 @@ test("Codex status: expired wins, a broken login says so, another usage error do
     const [r] = buildCodexRows([account(a)], NOW);
     return [r.status, r.tone, r.inactive];
   };
-  assert.deepEqual(status({ usage: usage({ error: "refresh_token_invalidated" }) }), ["login broken", "bad", false]);
-  assert.deepEqual(status({ usage: usage({ error: "HTTP 401 Unauthorized" }) }), ["login broken", "bad", false]);
+  assert.deepEqual(status({ usage: usage({ error: "refresh_token_invalidated" }) }), [SIGN_IN_AGAIN, "bad", false]);
+  assert.deepEqual(status({ usage: usage({ error: "HTTP 401 Unauthorized" }) }), [SIGN_IN_AGAIN, "bad", false]);
   assert.deepEqual(status({ usage: usage({ error: "network unreachable" }) }), ["usage error", "warn", false]);
   assert.deepEqual(
     status({ subscription_expires_at: "2026-10-01T00:00:00Z", usage: usage({ error: "refresh_token_invalidated" }) }),
@@ -279,7 +288,7 @@ test("Codex without a usage reading is unknown, never active", () => {
 
 test("Codex exhausted usage is not shown as active", () => {
   const [r] = buildCodexRows([account({ usage: usage({ primary_used_percent: 100 }) })], NOW);
-  assert.deepEqual([r.status, r.tone], ["exhausted", "bad"]);
+  assert.deepEqual([r.status, r.tone], [CODEX_EMPTY, "bad"]);
 });
 
 test("Codex rows are inactive when expired, or free with nothing left", () => {
@@ -513,7 +522,8 @@ test("a Codex account whose plan has ended shows no reset countdown", () => {
   const ended = buildCodexRows([account({ usage: usage(), subscription_expires_at: "2026-10-20T00:00:00Z" })], NOW)[0];
   assert.equal(ended.status, "expired");
   assert.equal(ended.resets, NONE);
-  assert.match(ended.renews, /^Expired /);
+  assert.match(ended.renews, /^Ended /);
+  assert.equal(ended.paying, false);
 });
 
 test("Claude seats use the same short words as Use next", () => {
@@ -524,6 +534,128 @@ test("Claude seats use the same short words as Use next", () => {
   assert.equal(word({ status: "no_usage_yet", sevenDay: null }), "Not used yet");
   assert.equal(word({ status: "unknown", sevenDay: null }), "No reading");
   assert.equal(word({ promState: "broken" }), "Not working");
-  const [ended] = buildClaudeRows([seat()], [{ id: "claude-mac-main", subscriptionExpiresOn: "2026-10-01" } as PlanDates], NOW);
+  // The default seat answered after Oct 1, so a passed Oct 1 end date is out of date, not an ended plan.
+  const [working] = buildClaudeRows([seat({ billingType: "stripe_subscription" })], [{ id: "claude-mac-main", subscriptionExpiresOn: "2026-10-01" } as PlanDates], NOW);
+  assert.equal(working.status, "Ready");
+  const [ended] = buildClaudeRows(
+    [seat({ sevenDay: week({ observed_at: "2026-09-30T12:00:00Z" }) })],
+    [{ id: "claude-mac-main", subscriptionExpiresOn: "2026-10-01" } as PlanDates],
+    NOW,
+  );
   assert.equal(ended.status, "Plan ended");
+});
+
+test("Codex plan names read as people say them", () => {
+  assert.equal(codexPlanLabel("promax"), "Pro Max");
+  assert.equal(codexPlanLabel("pro"), "Pro");
+  assert.equal(codexPlanLabel("plus"), "Plus");
+  assert.equal(codexPlanLabel("Free"), "Free");
+  assert.equal(codexPlanLabel("mystery"), "Mystery");
+  assert.equal(codexPlanLabel(null), "");
+  assert.equal(buildCodexRows([account({ plan_type: "promax" })], NOW)[0].type, "Codex Pro Max");
+});
+
+test("a signed-out paid Codex account keeps its last known paid-until date and stays under Paying now", () => {
+  const signedOut = account({
+    subscription_expires_at: null,
+    last_known_subscription_expires_at: "2026-11-23T14:22:58Z",
+    usage: usage({ error: "Token refresh failed: 401 Unauthorized - Your session has ended. Please log in again." }),
+  });
+  const [r] = buildCodexRows([signedOut], NOW);
+  assert.equal(r.status, SIGN_IN_AGAIN);
+  assert.match(r.renews, /^Paid until .* \(last known\) · sign in again on the Codex tab$/);
+  assert.equal(r.paying, true);
+  assert.equal(r.inactive, false);
+});
+
+test("a last known date that has passed is shown as ended and not paying", () => {
+  const old = account({ subscription_expires_at: null, last_known_subscription_expires_at: "2026-10-01T00:00:00Z" });
+  assert.match(codexPlanText(old, NOW, true), /^Probably ended .* \(last known\)$/);
+  assert.equal(isCodexPaying(old, NOW, true), false);
+  // While signed in, a saved date is never used: a missing live date is just "not known yet".
+  assert.equal(codexPlanText(old, NOW, false), "Paid plan · end date not known yet");
+  assert.equal(isCodexPaying(old, NOW, false), true);
+  // As a row: signed out with a passed last known date is listed as ended and dimmed.
+  const [row] = buildCodexRows([{ ...old, usage: usage({ error: "refresh_token_invalidated" }) }], NOW);
+  assert.deepEqual([row.paying, row.inactive, row.status], [false, true, SIGN_IN_AGAIN]);
+  // A live date always wins over the saved one.
+  const renewed = account({ subscription_expires_at: "2026-12-04T00:00:00Z", last_known_subscription_expires_at: "2026-10-01T00:00:00Z" });
+  assert.match(codexPlanText(renewed, NOW, true), /^Paid until /);
+  assert.equal(isCodexPaying(renewed, NOW, true), true);
+});
+
+test("free and API-key Codex accounts are never paying, even with an old paid date saved", () => {
+  const free = account({ plan_type: "free", subscription_expires_at: null, last_known_subscription_expires_at: "2026-12-05T00:00:00Z" });
+  assert.equal(codexPlanText(free, NOW, true), "Free plan");
+  assert.equal(isCodexPaying(free, NOW, true), false);
+  const key = account({ plan_type: null, auth_mode: "api_key", subscription_expires_at: null });
+  assert.equal(isCodexPaying(key, NOW), false);
+  // A paid plan with no date at all still counts as paying.
+  const undated = account({ plan_type: "pro", subscription_expires_at: null, last_known_subscription_expires_at: null });
+  assert.equal(codexPlanText(undated, NOW), "Paid plan · end date not known yet");
+  assert.equal(isCodexPaying(undated, NOW), true);
+});
+
+test("a Claude login with no paid billing is a free account, not a paying one", () => {
+  const [r] = buildClaudeRows([seat({ billingType: "none" })], [], NOW);
+  assert.equal(r.type, "Claude Free");
+  assert.equal(r.paying, false);
+  assert.deepEqual([r.status, r.renews], ["Free", "Free · no paid plan"]);
+  // A free login whose old paid plan ended is "Free", never "Plan ended", with the end day as a footnote.
+  const [old] = buildClaudeRows(
+    [seat({ billingType: "none", sevenDay: week({ observed_at: "2026-09-30T12:00:00Z" }) })],
+    [dates("claude-mac-main", { subscriptionExpiresOn: "2026-10-01" })],
+    NOW,
+  );
+  assert.equal(old.status, "Free");
+  assert.match(old.renews, /^Free · no paid plan \(paid plan ended .*\)$/);
+  const [paid] = buildClaudeRows([seat({ billingType: "stripe_subscription" })], [], NOW);
+  assert.equal(paid.paying, true);
+});
+
+test("a Claude seat still answering after its recorded end date says the date needs updating", () => {
+  const [r] = buildClaudeRows([seat({ billingType: "stripe_subscription" })], [dates("claude-mac-main", { subscriptionExpiresOn: "2026-10-01" })], NOW);
+  assert.equal(r.status, "Ready");
+  assert.match(r.renews, /^Still working · was due to end .* · check billing$/);
+  assert.equal(r.paying, true);
+  // A passed key expiry is never overridden by a reading.
+  const [key] = buildClaudeRows([seat({ billingType: "stripe_subscription" })], [dates("claude-mac-main", { subscriptionExpiresOn: "2026-10-01", credentialExpiresOn: "2026-10-29" })], NOW);
+  assert.equal(key.status, "Plan ended");
+  assert.equal(key.paying, false);
+  // Unknown billing or a broken seat proves nothing: the recorded end stands.
+  const [unknownBilling] = buildClaudeRows([seat({ billingType: null })], [dates("claude-mac-main", { subscriptionExpiresOn: "2026-10-01" })], NOW);
+  assert.deepEqual([unknownBilling.status, unknownBilling.paying], ["Plan ended", false]);
+  const [broken] = buildClaudeRows([seat({ billingType: "stripe_subscription", promState: "broken" })], [dates("claude-mac-main", { subscriptionExpiresOn: "2026-10-01" })], NOW);
+  assert.deepEqual([broken.status, broken.paying], ["Plan ended", false]);
+});
+
+test("hidden Claude logins are listed with their email and recorded end date", () => {
+  const registry = {
+    found: true,
+    seats: [{ id: "claude-mac-gustavo", host: "mac", plan: "max", usage_account: "mac-gustavo-max" }],
+    hidden_seat_ids: ["claude-mac-gustavo", "claude-unknown"],
+  };
+  const accounts = [{ account: "mac-gustavo-max", email: " gus00@example.com " }] as never;
+  const plans = [dates("claude-mac-gustavo", { subscriptionExpiresOn: "2026-10-10" })];
+  const logins = hiddenClaudeLogins(registry, accounts, plans, NOW);
+  assert.equal(logins.length, 2);
+  assert.equal(logins[0].email, "gus00@example.com");
+  assert.equal(logins[0].where, "Mac");
+  assert.match(logins[0].ended ?? "", /^Ended /);
+  assert.deepEqual([logins[1].email, logins[1].ended], [null, null]);
+  // A canceled seat still inside its paid time says when it stops, not "Paid until".
+  const future = hiddenClaudeLogins(registry, accounts, [dates("claude-mac-gustavo", { subscriptionExpiresOn: "2026-12-06" })], NOW);
+  assert.match(future[0].ended ?? "", /^Ends .* \(canceled\)$/);
+  assert.deepEqual(hiddenClaudeLogins(null, [], [], NOW), []);
+});
+
+test("Claude plan end dates show the real day, like Codex rows", () => {
+  assert.match(claudePlanEndText(dates("s", { subscriptionExpiresOn: "2026-11-30" }), NOW), /^Paid until Nov 30, 2026$/);
+  assert.match(claudePlanEndText(dates("s", { subscriptionExpiresOn: "2026-10-10" }), NOW), /^Ended Oct 10, 2026$/);
+  // Other saved dates keep the Providers wording.
+  assert.equal(claudePlanEndText(dates("s", { billingRenewsOn: "2026-10-01" }), NOW), "Recorded renews: Date passed · verify");
+  assert.equal(claudePlanEndText(undefined, NOW), "");
+  const [r] = buildClaudeRows([seat()], [dates("claude-mac-main", { subscriptionExpiresOn: "2026-11-30" })], NOW);
+  assert.match(r.renews, /^Paid until /);
+  assert.equal(r.paying, true);
 });

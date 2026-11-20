@@ -9,6 +9,8 @@ export interface AccountInfo {
   email: string | null;
   plan_type: string | null;
   subscription_expires_at: string | null;
+  /** Paid-until date saved at the last good sign-in; shown only as "last known", never as live. */
+  last_known_subscription_expires_at?: string | null;
   auth_mode: AuthMode;
   is_active: boolean;
   created_at: string;

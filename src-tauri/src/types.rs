@@ -358,6 +358,10 @@ pub struct AccountInfo {
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub subscription_expires_at: Option<DateTime<Utc>>,
+    /// The paid-until date saved from the ID token at the last sign-in or token refresh. Shown only as
+    /// "last known" while a login is signed out, never as live account metadata.
+    #[serde(default)]
+    pub last_known_subscription_expires_at: Option<DateTime<Utc>>,
     pub auth_mode: AuthMode,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
@@ -374,6 +378,7 @@ impl AccountInfo {
             // Subscription expiry is live account metadata. Stored values and
             // ID-token claims become stale and must not be used for display.
             subscription_expires_at: None,
+            last_known_subscription_expires_at: account.subscription_expires_at,
             auth_mode: account.auth_mode,
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
@@ -541,6 +546,9 @@ mod tests {
         let info = AccountInfo::from_stored(&account, None);
 
         assert_eq!(info.subscription_expires_at, None);
+        // The saved date still travels, labelled as last known, so a signed-out paid account
+        // can say how long it was paid for.
+        assert_eq!(info.last_known_subscription_expires_at, Some(stored_expiry));
     }
 
     #[test]

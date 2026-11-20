@@ -10,6 +10,7 @@ import {
   buildClaudeRows,
   buildCodexRows,
   claudeSeatsFromSources,
+  hiddenClaudeLogins,
   sortOverviewRows,
   type OverviewRow,
   type OverviewTone,
@@ -199,6 +200,13 @@ export function OverviewPanel({
     () => sortOverviewRows([...buildCodexRows(accounts, now), ...buildClaudeRows(seats, plans, now)]),
     [accounts, seats, plans, now],
   );
+  // Gus asked to see at a glance which accounts he still pays for: paid plans first, everything else after.
+  const payingRows = useMemo(() => subscriptionRows.filter((row) => row.paying), [subscriptionRows]);
+  const notPayingRows = useMemo(() => subscriptionRows.filter((row) => !row.paying), [subscriptionRows]);
+  const hiddenLogins = useMemo(
+    () => hiddenClaudeLogins(registry, summary?.accounts ?? [], plans, now),
+    [registry, summary, plans, now],
+  );
   const prepaidRows = useMemo(
     () => sortOverviewRows(buildApiCreditRows(credits?.providers ?? [], plans, now)),
     [credits, plans, now],
@@ -252,12 +260,39 @@ export function OverviewPanel({
       </div>
 
       <Section
-        title="Subscriptions"
-        rows={subscriptionRows}
+        title={`Paying now${payingRows.length ? ` (${payingRows.length})` : ""}`}
+        rows={payingRows}
         isMasked={isMasked}
-        empty={subscriptionsEmpty}
+        empty={subscriptionRows.length ? "No paid plans found." : subscriptionsEmpty}
         note={subscriptionsNote}
       />
+      <Section
+        title={`Free or ended${notPayingRows.length ? ` (${notPayingRows.length})` : ""}`}
+        rows={notPayingRows}
+        isMasked={isMasked}
+        empty={subscriptionRows.length ? "Every account here is on a paid plan." : "—"}
+      />
+      {hiddenLogins.length > 0 && (
+        <section aria-label="Hidden Claude logins" className="min-w-0">
+          <h3 className="mb-2 text-sm font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            Hidden Claude logins ({hiddenLogins.length})
+          </h3>
+          <ul className="space-y-1 rounded-xl border border-dashed border-gray-200 p-3 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+            {hiddenLogins.map((login) => (
+              <li key={login.seatId} className="flex min-w-0 flex-wrap justify-between gap-x-3">
+                <span className="break-all">
+                  {login.email
+                    ? <BlurredText blur={masked}>{login.email}</BlurredText>
+                    : <span className="italic">email unknown ({login.seatId})</span>}
+                  {login.where && <span className="ml-1 text-gray-400">· {login.where}</span>}
+                </span>
+                <span>{login.ended ?? "no end date recorded"}</span>
+              </li>
+            ))}
+            <li className="pt-1 text-gray-400">Claude logins you set up before, hidden on the Claude tab because their plans were canceled.</li>
+          </ul>
+        </section>
+      )}
       <Section
         title="Prepaid APIs"
         rows={prepaidRows}
@@ -271,8 +306,9 @@ export function OverviewPanel({
 
       <p className="text-xs text-gray-400 dark:text-gray-500">
         Left is the Codex window with the least remaining, the limiting current 5-hour or weekly window for Claude, and the provider balance for
-        prepaid APIs. Grok has no quota API, so its Left is the last hand reading from grok.com with its age. Expired
-        accounts and free accounts with nothing left sort last and are dimmed.
+        prepaid APIs. Grok has no quota API, so its Left is the last hand reading from grok.com with its age. "Paying now" lists
+        paid plans that have not ended; "(last known)" dates come from the last good sign-in. Expired accounts and free
+        accounts with nothing left are dimmed.
       </p>
     </div>
   );
