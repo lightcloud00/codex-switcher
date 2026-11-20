@@ -6,6 +6,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
@@ -95,14 +97,43 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     println!("Codex Switcher web server listening on http://{address}");
     println!("Serving static files from {}", dist_dir.display());
 
+    // Each request gets its own thread: complete_login waits up to five minutes for
+    // the browser, and a serial loop would hold every other call (cancel_login,
+    // open_login_url, list_accounts) behind it. The GUI's Tauri commands already
+    // run concurrently, so the commands themselves expect it.
+    let runtime = Arc::new(runtime);
+    let dist_dir = Arc::new(dist_dir);
+    let in_flight = Arc::new(AtomicUsize::new(0));
     for request in server.incoming_requests() {
-        if let Err(error) = handle_request(request, &runtime, &dist_dir) {
-            eprintln!("[web] request failed: {error:#}");
+        // shortcut: fixed cap of MAX_IN_FLIGHT loopback requests, raise it if a real UI needs more.
+        if in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            let _ = respond_json(
+                request,
+                StatusCode(503),
+                &json!({ "error": "Too many requests at once; try again" }),
+            );
+            continue;
+        }
+        let (runtime, dist_dir, in_flight) = (runtime.clone(), dist_dir.clone(), in_flight.clone());
+        let spawned = std::thread::Builder::new()
+            .name("codex-web-request".into())
+            .spawn(move || {
+                if let Err(error) = handle_request(request, &runtime, &dist_dir) {
+                    eprintln!("[web] request failed: {error:#}");
+                }
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            });
+        if let Err(error) = spawned {
+            eprintln!("[web] could not start a request thread: {error}");
         }
     }
 
     Ok(())
 }
+
+/// Requests handled at once; complete_login holds one for up to five minutes.
+const MAX_IN_FLIGHT: usize = 32;
 
 fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> anyhow::Result<()> {
     if let Err(rejection) = crate::web_access::validate_local_request(&request) {
