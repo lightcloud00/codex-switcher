@@ -29,6 +29,7 @@ export interface UsageInfo {
   has_credits: boolean | null;
   unlimited_credits: boolean | null;
   credits_balance: string | null;
+  error_http_status?: number;
   error: string | null;
 }
 
@@ -119,6 +120,7 @@ export interface UseNextRow {
   status: UseNextStatus;
   /** The exporter's reason, e.g. host_not_admitted on a lane that is clean for a manual switch. */
   availability_reason: string;
+  usage_error_kind?: "auth" | "permission" | "rate_limit" | "service" | "unknown";
   plan_class: string;
   remaining_percent: number | null;
   /** When an exhausted lane's empty window resets. */

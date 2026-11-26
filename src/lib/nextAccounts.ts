@@ -246,8 +246,16 @@ export function whyText(row: UseNextRow): string {
       return "Busy: Codex is running on it now, so the router hands it to nobody else.";
     case "exhausted":
       return "Empty: a usage window is used up. Empty accounts follow by when they come back.";
-    case "refresh_failed":
-      return "The last usage check failed, so it can't be ranked.";
+    case "refresh_failed": {
+      const reasons = {
+        auth: "The provider rejected authentication for the last usage check.",
+        permission: "The provider denied the last usage check.",
+        rate_limit: "The provider rate-limited the last usage check.",
+        service: "The provider returned a server error during the last usage check.",
+        unknown: "The last usage check failed, so it can't be ranked.",
+      };
+      return reasons[row.usage_error_kind ?? "unknown"];
+    }
     case "expired":
       return "The plan has ended, so it goes last.";
     default:

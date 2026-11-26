@@ -11,6 +11,7 @@ pub mod commands;
 #[cfg(desktop)]
 pub mod tray;
 pub mod types;
+mod usage_diagnostics;
 pub mod web;
 mod web_access;
 

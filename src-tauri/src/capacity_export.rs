@@ -17,6 +17,7 @@ use crate::{
         read_hidden_seat_ids, read_seat_registry, visible_seat_readings, SeatReading,
     },
     types::{AccountsStore, StoredAccount, UsageInfo},
+    usage_diagnostics::usage_error_kind,
 };
 
 const SNAPSHOT_SCHEMA: &str = "aos.capacity-snapshot.v1";
@@ -50,6 +51,9 @@ struct CapacityLane {
     lease_valid: bool,
     refreshed_at: String,
     local_read_only: bool,
+    // The v1 router rejects additional lane fields. Diagnostics use their own projection.
+    #[serde(skip)]
+    usage_error_kind: Option<&'static str>,
     availability_reason: String,
 }
 
@@ -326,6 +330,11 @@ fn codex_lane(
         lease_valid,
         refreshed_at: refreshed_at.to_string(),
         local_read_only: false,
+        usage_error_kind: usage.and_then(|row| {
+            row.error
+                .as_ref()
+                .map(|_| usage_error_kind(row.error_http_status))
+        }),
         availability_reason: availability_reason.to_string(),
     }
 }
@@ -345,6 +354,8 @@ pub struct UseNextRow {
     pub status: &'static str,
     /// The exporter's reason, e.g. host_not_admitted on a lane that is clean for a manual switch.
     pub availability_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_error_kind: Option<&'static str>,
     pub plan_class: String,
     pub remaining_percent: Option<f64>,
     /// When an exhausted lane's empty window resets; null for every other status.
@@ -466,6 +477,7 @@ fn build_use_next_plan(
                 lane_id: lane.lane_id,
                 status,
                 availability_reason: lane.availability_reason,
+                usage_error_kind: lane.usage_error_kind,
                 plan_class: lane.plan_class,
                 remaining_percent: lane.remaining_percent,
                 back_at: (status == "exhausted")
@@ -595,6 +607,15 @@ pub async fn export_capacity(
     admission_path: Option<&Path>,
     include_claude_seats: bool,
 ) -> Result<()> {
+    export_capacity_with_diagnostics(output, admission_path, include_claude_seats, false).await
+}
+
+pub async fn export_capacity_with_diagnostics(
+    output: &Path,
+    admission_path: Option<&Path>,
+    include_claude_seats: bool,
+    write_refresh_diagnostics: bool,
+) -> Result<()> {
     let mut store = load_accounts().context("accounts_unavailable")?;
     // Codex refreshes the active account itself, so fold its live login into
     // this copy: a renewal then shows here even while the app is closed. The
@@ -621,6 +642,36 @@ pub async fn export_capacity(
         now,
         claude_lanes,
     )?;
+    if write_refresh_diagnostics {
+        let mut path = output.as_os_str().to_owned();
+        path.push(".refresh-diagnostics.json");
+        write_projection(Path::new(&path), &refresh_diagnostics(&snapshot))?;
+    }
+    write_projection(output, &snapshot)
+}
+
+fn refresh_diagnostics(snapshot: &CapacitySnapshot) -> serde_json::Value {
+    let failures: Vec<_> = snapshot
+        .lanes
+        .iter()
+        .filter_map(|lane| {
+            lane.usage_error_kind.map(|kind| {
+                serde_json::json!({
+                    "account_alias_hash": lane.account_alias_hash,
+                    "usage_error_kind": kind,
+                })
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema": "aos.switcher-refresh-diagnostics.v1",
+        "snapshot_id": snapshot.snapshot_id,
+        "observed_at": snapshot.observed_at,
+        "failures": failures,
+    })
+}
+
+fn write_projection(output: &Path, projection: &impl Serialize) -> Result<()> {
     let parent = output.parent().context("capacity_output_parent_missing")?;
     fs::create_dir_all(parent).context("capacity_output_parent_unwritable")?;
     let temporary = parent.join(format!(
@@ -631,7 +682,7 @@ pub async fn export_capacity(
             .unwrap_or("capacity"),
         std::process::id()
     ));
-    fs::write(&temporary, serde_json::to_vec_pretty(&snapshot)?)
+    fs::write(&temporary, serde_json::to_vec_pretty(projection)?)
         .context("capacity_output_write_failed")?;
     #[cfg(unix)]
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
@@ -701,6 +752,7 @@ mod tests {
             has_credits: Some(false),
             unlimited_credits: Some(false),
             credits_balance: None,
+            error_http_status: None,
             error: None,
         };
         let now = Utc.timestamp_opt(1_799_000_000, 0).single().unwrap();
@@ -806,6 +858,7 @@ mod tests {
             has_credits: Some(false),
             unlimited_credits: Some(false),
             credits_balance: None,
+            error_http_status: None,
             error: None,
         };
         // The Claude usage fixture was generated at 2026-10-11T17:21:58Z.
@@ -959,6 +1012,7 @@ mod tests {
             has_credits: Some(false),
             unlimited_credits: Some(false),
             credits_balance: None,
+            error_http_status: None,
             error: None,
         }
     }
@@ -1021,6 +1075,63 @@ mod tests {
             plan.rows.iter().map(|row| row.position).collect::<Vec<_>>(),
             [1, 2, 3, 4, 5]
         );
+    }
+
+    #[test]
+    fn refresh_diagnostics_preserve_router_contract_and_drop_error_text() {
+        let now = use_next_now();
+        let failed = use_next_account("private identity", None);
+        let good = use_next_account("healthy", None);
+        let legacy = use_next_account("legacy", None);
+        let mut failed_usage = UsageInfo::error(failed.id.clone(), "private URL and body".into());
+        failed_usage.error_http_status = Some(429);
+        let usage = vec![
+            failed_usage,
+            use_next_usage(&good, 0.0, 0.0),
+            UsageInfo::error(legacy.id.clone(), "private URL and body: 401".into()),
+        ];
+        let alias = account_alias_hash(&failed.id);
+        let legacy_alias = account_alias_hash(&legacy.id);
+        let store = store_of(vec![failed, good, legacy], None);
+        let admission = safe_admission(None, now).unwrap();
+        let snapshot = build_snapshot(&store, &usage, false, &admission, now).unwrap();
+        let router = serde_json::to_value(&snapshot).unwrap();
+        for lane in router["lanes"].as_array().unwrap() {
+            assert_eq!(keys_of(lane), CODEX_LANE_KEYS);
+        }
+        let sidecar = refresh_diagnostics(&snapshot);
+        assert_eq!(sidecar["snapshot_id"], snapshot.snapshot_id);
+        let failures = sidecar["failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 2);
+        for (alias, kind) in [(alias, "rate_limit"), (legacy_alias, "unknown")] {
+            let row = failures
+                .iter()
+                .find(|v| v["account_alias_hash"] == alias)
+                .unwrap();
+            assert_eq!(keys_of(row), ["account_alias_hash", "usage_error_kind"]);
+            assert_eq!(row["usage_error_kind"], kind);
+            let lane = snapshot
+                .lanes
+                .iter()
+                .find(|v| v.account_alias_hash == alias)
+                .unwrap();
+            assert_eq!(lane.availability_reason, "usage_refresh_failed");
+            assert_eq!(lane.remaining_percent, None);
+        }
+        assert!(!sidecar.to_string().contains("private"));
+        assert!(!router.to_string().contains("private"));
+        let plan = build_use_next_plan(&store, &usage, false, &HashMap::new(), now);
+        assert_eq!(
+            plan.rows
+                .iter()
+                .filter(|r| r.status == "refresh_failed")
+                .count(),
+            2
+        );
+        assert!(plan
+            .rows
+            .iter()
+            .any(|r| r.usage_error_kind == Some("rate_limit")));
     }
 
     #[test]

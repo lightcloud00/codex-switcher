@@ -39,10 +39,11 @@ async fn main() {
     });
     let admission = argument("--admission");
     let include_claude_seats = flag("--include-claude-seats");
-    if codex_switcher_lib::capacity_export::export_capacity(
+    if codex_switcher_lib::capacity_export::export_capacity_with_diagnostics(
         &output,
         admission.as_deref(),
         include_claude_seats,
+        flag("--write-refresh-diagnostics"),
     )
     .await
     .is_err()

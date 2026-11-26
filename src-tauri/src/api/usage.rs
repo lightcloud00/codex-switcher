@@ -83,6 +83,7 @@ pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
             has_credits: None,
             unlimited_credits: None,
             credits_balance: None,
+            error_http_status: None,
             error: Some("Usage info not available for API key accounts".to_string()),
         }),
         AuthData::ChatGPT { .. } => get_usage_with_chatgpt_auth(account).await,
@@ -177,10 +178,9 @@ async fn parse_usage_response(
     let status = response.status();
 
     if !status.is_success() {
-        return Ok(UsageInfo::error(
-            account_id.to_string(),
-            format!("API error: {status}"),
-        ));
+        let mut usage = UsageInfo::error(account_id.to_string(), format!("API error: {status}"));
+        usage.error_http_status = Some(status.as_u16());
+        return Ok(usage);
     }
 
     let body_text = response
@@ -542,6 +542,7 @@ fn convert_payload_to_usage_info(account_id: &str, payload: RateLimitStatusPaylo
         has_credits: credits.as_ref().map(|c| c.has_credits),
         unlimited_credits: credits.as_ref().map(|c| c.unlimited),
         credits_balance: credits.and_then(|c| c.balance),
+        error_http_status: None,
         error: None,
     }
 }
@@ -589,7 +590,12 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
                 Ok(info) => info,
                 Err(e) => {
                     println!("[Usage] Error for {}: {}", account.name, e);
-                    UsageInfo::error(account.id.clone(), e.to_string())
+                    let mut usage = UsageInfo::error(account.id.clone(), e.to_string());
+                    usage.error_http_status = e
+                        .downcast_ref::<reqwest::Error>()
+                        .and_then(reqwest::Error::status)
+                        .map(|status| status.as_u16());
+                    usage
                 }
             }
         })
