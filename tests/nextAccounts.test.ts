@@ -273,6 +273,15 @@ test("trayUseNext gives the tray a ready-made line and short title, names only",
   assert.doesNotMatch(serialized, /@|token/i);
 });
 
+test("refresh failure details describe the sanitized status and handle older rows", () => {
+  const failed = { status: "refresh_failed" } as const;
+  assert.match(whyText(row({ ...failed, usage_error_kind: "auth" })), /rejected authentication/);
+  assert.match(whyText(row({ ...failed, usage_error_kind: "permission" })), /denied/);
+  assert.match(whyText(row({ ...failed, usage_error_kind: "rate_limit" })), /rate-limited/);
+  assert.match(whyText(row({ ...failed, usage_error_kind: "service" })), /server error/);
+  assert.equal(whyText(row(failed)), whyText(row({ ...failed, usage_error_kind: "unknown" })));
+});
+
 test("stripDays steps calendar days through the daylight time change and marks the show", () => {
   const days = stripDays(NOW, 10, ET);
   assert.deepEqual(

@@ -565,6 +565,7 @@ mod tests {
             has_credits: None,
             unlimited_credits: None,
             credits_balance: None,
+            error_http_status: None,
             error: None,
         }
     }

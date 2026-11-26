@@ -266,7 +266,7 @@ The OAuth client the CLI uses is read from the installed CLI. If that cannot be 
 Besides the app, the Rust crate builds two binaries:
 
 - `codex-web` – the browser dashboard server (`pnpm lan`). It exits with status 1 on a startup error.
-- `codex-switcher-capacity-export` – writes a sanitized capacity snapshot for the fleet router: `--output <file>` (required; exits with status 2 without it or when the export fails), `--admission <file>` (optional admission record) and `--include-claude-seats` (also export the Claude seat lanes).
+- `codex-switcher-capacity-export` – writes a sanitized capacity snapshot for the fleet router: `--output <file>` (required; exits with status 2 without it or when the export fails), `--admission <file>` (optional admission record) and `--include-claude-seats` (also export the Claude seat lanes). Add `--write-refresh-diagnostics` to write `<file>.refresh-diagnostics.json` from the same observation. Match its `snapshot_id` to the router snapshot. Each failure contains a hashed account alias and one of `auth`, `permission`, `rate_limit`, `service`, or `unknown`. The Use next details show the category when available.
 
 Environment variables:
 

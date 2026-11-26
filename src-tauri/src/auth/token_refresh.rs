@@ -383,8 +383,13 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 
     if !response.status().is_success() {
         let status = response.status();
+        let http_error = response.error_for_status_ref().err();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Token refresh failed: {status} - {body}");
+        let message = format!("Token refresh failed: {status} - {body}");
+        if let Some(error) = http_error {
+            return Err(error.without_url()).context(message);
+        }
+        anyhow::bail!(message);
     }
 
     response

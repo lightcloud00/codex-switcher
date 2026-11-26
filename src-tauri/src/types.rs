@@ -420,6 +420,9 @@ pub struct UsageInfo {
     pub unlimited_credits: Option<bool>,
     /// Credit balance string (e.g., "$10.50")
     pub credits_balance: Option<String>,
+    /// HTTP status from a failed usage or token-refresh request, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_http_status: Option<u16>,
     /// Error message if usage fetch failed
     pub error: Option<String>,
 }
@@ -438,6 +441,7 @@ impl UsageInfo {
             has_credits: None,
             unlimited_credits: None,
             credits_balance: None,
+            error_http_status: None,
             error: Some(error),
         }
     }
