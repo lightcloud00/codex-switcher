@@ -194,7 +194,7 @@ test("rowLine says what happens to each account next, in one line", () => {
     plain(rowLine(entry({ status: "exhausted", back_at: "2026-11-03T22:00:00Z" }), NOW, ET)),
     "Back in 2 days 15 hours, Tue 5 PM EST"
   );
-  assert.equal(rowLine(entry({ status: "refresh_failed" }), NOW, ET), "Couldn't check usage · refresh or sign in again");
+  assert.equal(rowLine(entry({ status: "refresh_failed" }), NOW, ET), "Couldn't check usage · try refreshing");
   assert.equal(
     rowLine(entry({ status: "expired", subscription_expires_at: "2026-09-05T19:00:48Z" }), NOW, ET),
     "Plan ended Sep 5 · renew to use"
@@ -397,13 +397,13 @@ test("a failed check names the cause: signed out says sign in again, a network e
   const ended = entry({ status: "refresh_failed" }, { usage: usage({ error: "refresh_token_invalidated: session has ended" }) });
   assert.equal(rowLine(ended, NOW, ET), "Signed out — sign in again");
   assert.equal(needsRelogin(ended), true);
-  const expired = entry({ status: "refresh_failed" }, { usage: usage({ error: "token_expired" }) });
+  const expired = entry({ status: "refresh_failed" }, { usage: usage({ error: "refresh_token_expired" }) });
   assert.equal(rowLine(expired, NOW, ET), "Session expired — sign in again");
   const network = entry({ status: "refresh_failed" }, { usage: usage({ error: "error sending request: connection timed out" }) });
-  assert.equal(rowLine(network, NOW, ET), "Couldn't check usage · refresh or sign in again");
+  assert.equal(rowLine(network, NOW, ET), "Couldn't check usage · try refreshing");
   assert.equal(needsRelogin(network), false);
   const noUsage = entry({ status: "refresh_failed" }, { usage: undefined });
-  assert.equal(rowLine(noUsage, NOW, ET), "Couldn't check usage · refresh or sign in again");
+  assert.equal(rowLine(noUsage, NOW, ET), "Couldn't check usage · try refreshing");
   assert.equal(needsRelogin(noUsage), false);
   // An auth error on a row that is not failed (a stale error) does not ask for a sign-in.
   assert.equal(needsRelogin(entry({ status: "clean" }, { usage: usage({ error: "token_expired" }) })), false);

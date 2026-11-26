@@ -5,14 +5,12 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
+use crate::auth::storage::same_chatgpt_login;
 use crate::auth::{
     add_account, codex_holds_account, codex_uses_account, load_accounts, load_store_reconciled,
     save_accounts, switch_to_account, AUTH_OPERATION_LOCK,
 };
-use crate::types::{
-    parse_chatgpt_id_token_claims, AccountInfo, AccountsStore, AuthData, OAuthLoginInfo,
-    StoredAccount,
-};
+use crate::types::{AccountInfo, AccountsStore, AuthData, OAuthLoginInfo, StoredAccount};
 
 struct PendingOAuth {
     rx: Option<oneshot::Receiver<anyhow::Result<OAuthLoginResult>>>,
@@ -87,7 +85,7 @@ fn validate_relogin_identity(old: &StoredAccount, new: &StoredAccount) -> Result
     ) {
         return Err("Only ChatGPT accounts support re-login".into());
     }
-    if same_login(old, new) {
+    if same_chatgpt_login(old, new) {
         return Ok(());
     }
     let wanted = old.email.as_deref().unwrap_or(old.name.as_str());
@@ -102,47 +100,14 @@ fn validate_relogin_identity(old: &StoredAccount, new: &StoredAccount) -> Result
     ))
 }
 
-/// Whether two saved logins are the same user in the same workspace. Missing
-/// identity never matches, so callers stay cautious.
-fn same_login(old: &StoredAccount, new: &StoredAccount) -> bool {
-    let (
-        AuthData::ChatGPT {
-            id_token: old_token,
-            account_id: old_id,
-            ..
-        },
-        AuthData::ChatGPT {
-            id_token: new_token,
-            account_id: new_id,
-            ..
-        },
-    ) = (&old.auth_data, &new.auth_data)
-    else {
-        return false;
-    };
-    let old_claims = parse_chatgpt_id_token_claims(old_token);
-    let new_claims = parse_chatgpt_id_token_claims(new_token);
-    let old_workspace = old_claims.account_id.as_ref().or(old_id.as_ref());
-    let new_workspace = new_claims.account_id.as_ref().or(new_id.as_ref());
-    let same_user = match (old_claims.subject.as_deref(), new_claims.subject.as_deref()) {
-        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a == b,
-        _ => match (
-            old_claims.email.as_deref().or(old.email.as_deref()),
-            new.email.as_deref(),
-        ) {
-            (Some(a), Some(b)) if !a.trim().is_empty() && !b.trim().is_empty() => {
-                a.eq_ignore_ascii_case(b)
-            }
-            _ => false,
-        },
-    };
-    same_user && old_workspace.is_some_and(|id| !id.is_empty()) && old_workspace == new_workspace
-}
-
 /// Adding a login that is already saved would only duplicate it; this happens
 /// when the browser was already signed in to that account.
 fn reject_duplicate_login(store: &AccountsStore, new: &StoredAccount) -> Result<(), String> {
-    match store.accounts.iter().find(|saved| same_login(saved, new)) {
+    match store
+        .accounts
+        .iter()
+        .find(|saved| same_chatgpt_login(saved, new))
+    {
         Some(saved) => Err(format!(
             "You signed in as {}, which is already saved as \"{}\". To add a different account, sign in with that account's email (the switcher opens its Chrome profile) or paste the link into a private window.",
             login_email(new),

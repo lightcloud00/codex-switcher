@@ -1,16 +1,20 @@
 import type { UsageInfo } from "../types";
 import { formatUsageError } from "../lib/usageError";
+import { assessUsage, validUsedPercent } from "../lib/accountHealth";
 
 interface UsageBarProps {
   usage?: UsageInfo;
   loading?: boolean;
   /** Render nothing for a usage error the caller already explains itself. */
   hideError?: boolean;
+  checkedAt?: number;
+  nowMs?: number;
+  unsupported?: boolean;
 }
 
-function formatResetTime(resetAt: number | null | undefined): string {
-  if (!resetAt) return "";
-  const now = Math.floor(Date.now() / 1000);
+function formatResetTime(resetAt: number | null | undefined, nowMs: number): string {
+  if (!resetAt || !Number.isFinite(resetAt)) return "";
+  const now = Math.floor(nowMs / 1000);
   const diff = resetAt - now;
   if (diff <= 0) return "now";
   if (diff < 60) return `${diff}s`;
@@ -22,6 +26,7 @@ function formatExactResetTime(resetAt: number | null | undefined): string {
   if (!resetAt) return "";
 
   const date = new Date(resetAt * 1000);
+  if (!Number.isFinite(date.getTime())) return "";
   const month = new Intl.DateTimeFormat(undefined, { month: "long" }).format(date);
   const day = date.getDate();
   const minutes = String(date.getMinutes()).padStart(2, "0");
@@ -32,7 +37,7 @@ function formatExactResetTime(resetAt: number | null | undefined): string {
 }
 
 function formatWindowDuration(minutes: number | null | undefined): string {
-  if (!minutes) return "";
+  if (!minutes || !Number.isFinite(minutes) || minutes < 0) return "";
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h`;
@@ -44,33 +49,38 @@ function RateLimitBar({
   usedPercent,
   windowMinutes,
   resetsAt,
+  historical,
+  nowMs,
 }: {
   label: string;
   usedPercent: number;
   windowMinutes?: number | null;
   resetsAt?: number | null;
+  historical: boolean;
+  nowMs: number;
 }) {
   // Calculate remaining percentage
   const remainingPercent = Math.max(0, 100 - usedPercent);
   
   // Color based on remaining (green = plenty left, red = almost none left)
-  const colorClass =
-    remainingPercent <= 10
+  const colorClass = historical
+    ? "bg-gray-400"
+    : remainingPercent <= 10
       ? "bg-red-500"
       : remainingPercent <= 30
         ? "bg-amber-500"
         : "bg-emerald-500";
 
   const windowLabel = formatWindowDuration(windowMinutes);
-  const resetLabel = formatResetTime(resetsAt);
-  const exactResetLabel = formatExactResetTime(resetsAt);
+  const resetLabel = historical ? "" : formatResetTime(resetsAt, nowMs);
+  const exactResetLabel = historical ? "" : formatExactResetTime(resetsAt);
 
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-        <span>{windowLabel ? `${windowLabel} limit` : label}</span>
+      <div className="flex flex-wrap justify-between gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+        <span className="shrink-0">{windowLabel ? `${windowLabel} limit` : label}</span>
         <span>
-          {remainingPercent.toFixed(0)}% left
+          {historical && "Last reading: "}{remainingPercent.toFixed(0)}% left
           {resetLabel && ` • resets ${resetLabel}`}
           {resetLabel && exactResetLabel && ` (${exactResetLabel})`}
         </span>
@@ -85,7 +95,10 @@ function RateLimitBar({
   );
 }
 
-export function UsageBar({ usage, loading, hideError }: UsageBarProps) {
+export function UsageBar({ usage, loading, hideError, checkedAt, nowMs = Date.now(), unsupported }: UsageBarProps) {
+  if (unsupported) {
+    return <div className="py-1 text-xs text-gray-500 dark:text-gray-400">Subscription quota is unavailable for API-key accounts.</div>;
+  }
   if (loading && !usage) {
     return (
       <div className="space-y-2">
@@ -101,8 +114,8 @@ export function UsageBar({ usage, loading, hideError }: UsageBarProps) {
 
   if (!usage) {
     return (
-      <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1 animate-pulse">
-        Fetching usage...
+      <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
+        Usage not yet checked
       </div>
     );
   }
@@ -118,25 +131,30 @@ export function UsageBar({ usage, loading, hideError }: UsageBarProps) {
     );
   }
 
-  const hasPrimary = usage.primary_used_percent !== null && usage.primary_used_percent !== undefined;
-  const hasSecondary = usage.secondary_used_percent !== null && usage.secondary_used_percent !== undefined;
+  const reading = assessUsage(usage, checkedAt, nowMs);
+  const hasPrimary = validUsedPercent(usage.primary_used_percent);
+  const hasSecondary = validUsedPercent(usage.secondary_used_percent);
+  const historical = reading.state !== "current";
 
-  if (!hasPrimary && !hasSecondary) {
+  if (!reading.valid) {
     return (
       <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
-        No rate limit data
+        {reading.detail}
       </div>
     );
   }
 
   return (
     <div className="space-y-2">
+      {historical && <div className="text-xs text-amber-700 dark:text-amber-300">{reading.detail}</div>}
       {hasPrimary && (
         <RateLimitBar
           label="5h Limit"
           usedPercent={usage.primary_used_percent!}
           windowMinutes={usage.primary_window_minutes}
           resetsAt={usage.primary_resets_at}
+          historical={historical}
+          nowMs={nowMs}
         />
       )}
       {hasSecondary && (
@@ -145,11 +163,13 @@ export function UsageBar({ usage, loading, hideError }: UsageBarProps) {
           usedPercent={usage.secondary_used_percent!}
           windowMinutes={usage.secondary_window_minutes}
           resetsAt={usage.secondary_resets_at}
+          historical={historical}
+          nowMs={nowMs}
         />
       )}
       {usage.credits_balance && (
         <div className="text-xs text-gray-500 dark:text-gray-400">
-          Credits: {usage.credits_balance}
+          {historical ? "Last reported credits" : "Credits"}: {usage.credits_balance}
         </div>
       )}
     </div>

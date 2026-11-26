@@ -27,35 +27,7 @@ pub enum Outcome {
     Other,
 }
 
-/// Case-insensitive match on the error shapes the usage and refresh code produce. Deliberately
-/// narrow: messages that merely mention "token" or "login" do not count, and a bare 403 is the
-/// Cloudflare challenge, not an expired login.
-pub fn is_sign_in_failure(error: &str) -> bool {
-    let e = error.to_ascii_lowercase();
-    const MARKERS: [&str; 9] = [
-        "unauthorized",
-        "invalid_grant",
-        "invalid_token",
-        "token_expired",
-        "token_invalidated",
-        "token_revoked",
-        "refresh_token_reused",
-        "refresh_token_expired",
-        "refresh_token_invalidated",
-    ];
-    MARKERS.iter().any(|m| e.contains(m))
-        || e.contains("missing refresh token")
-        || contains_word(&e, "401")
-}
-
-fn contains_word(haystack: &str, word: &str) -> bool {
-    haystack.match_indices(word).any(|(start, _)| {
-        let before = haystack[..start].chars().next_back();
-        let after = haystack[start + word.len()..].chars().next();
-        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
-            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
-    })
-}
+pub use crate::auth::sign_in_failure::is_sign_in_failure;
 
 /// Classifies one usage check (either an error result or a usage row carrying an error).
 pub fn classify_usage(result: &Result<UsageInfo, String>) -> Outcome {
@@ -475,13 +447,11 @@ mod tests {
     #[test]
     fn real_sign_in_errors_are_recognised() {
         for e in [
-            "API error: 401 Unauthorized",
             "Token refresh failed: invalid_grant",
             "refresh_token_reused",
             "Refresh token expired: refresh_token_expired",
-            "token_revoked",
+            "refresh_token_revoked",
             "missing refresh token",
-            "HTTP 401",
         ] {
             assert!(is_sign_in_failure(e), "{e}");
         }
@@ -490,6 +460,9 @@ mod tests {
     #[test]
     fn other_errors_are_not_sign_in_failures() {
         for e in [
+            "API error: 401 Unauthorized",
+            "HTTP 401",
+            "token_expired",
             "API error: 403 Forbidden",
             "API error: 429 Too Many Requests",
             "API error: 500 Internal Server Error",
@@ -509,7 +482,7 @@ mod tests {
     fn classification_reads_both_error_shapes() {
         assert_eq!(classify_usage(&Ok(usage(None))), Outcome::Fresh);
         assert_eq!(
-            classify_usage(&Ok(usage(Some("API error: 401 Unauthorized")))),
+            classify_usage(&Ok(usage(Some("refresh_token_invalidated")))),
             Outcome::SignInFailed
         );
         assert_eq!(

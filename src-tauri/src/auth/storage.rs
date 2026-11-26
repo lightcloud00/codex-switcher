@@ -83,6 +83,18 @@ impl ChatGptIdentity {
     }
 }
 
+/// Confirm the same user and workspace across every account-ingestion path.
+/// Unknown identity is not a duplicate; workspace-only evidence is insufficient.
+pub(crate) fn same_chatgpt_login(left: &StoredAccount, right: &StoredAccount) -> bool {
+    match (
+        ChatGptIdentity::of_account(left),
+        ChatGptIdentity::of_account(right),
+    ) {
+        (Some(left), Some(right)) => left.matches(&right),
+        _ => false,
+    }
+}
+
 /// Whether Codex's live auth.json may hold this account's tokens. A login with
 /// no readable identity counts as a match, so callers stay cautious with it.
 pub fn live_auth_may_hold_account(account: &StoredAccount, auth: &AuthDotJson) -> bool {
@@ -387,6 +399,16 @@ fn add_account_to_store(
     if store.accounts.iter().any(|a| a.name == account.name) {
         anyhow::bail!("An account with name '{}' already exists", account.name);
     }
+    if let Some(saved) = store
+        .accounts
+        .iter()
+        .find(|saved| same_chatgpt_login(saved, &account))
+    {
+        anyhow::bail!(
+            "This ChatGPT account and workspace are already saved as '{}'",
+            saved.name
+        );
+    }
 
     let account_clone = account.clone();
     store.accounts.push(account);
@@ -595,7 +617,7 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 mod tests {
     use super::{
         add_account_to_store, live_auth_may_hold_account, reconcile_active_account_with_live_auth,
-        sync_active_account_tokens,
+        same_chatgpt_login, sync_active_account_tokens,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
@@ -714,6 +736,62 @@ mod tests {
 
             assert_eq!(store.active_account_id, expected_active_id);
         }
+    }
+
+    #[test]
+    fn renamed_duplicate_login_is_rejected_without_changing_saved_account() {
+        let saved = account("Saved", "workspace-a", "original");
+        let mut store = AccountsStore {
+            accounts: vec![saved.clone()],
+            active_account_id: Some(saved.id.clone()),
+            ..AccountsStore::default()
+        };
+        let before = serde_json::to_value(&store).unwrap();
+        let duplicate = account("Renamed import", "workspace-a", "different-tokens");
+        assert!(add_account_to_store(&mut store, duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("already saved"));
+        assert_eq!(serde_json::to_value(&store).unwrap(), before);
+    }
+
+    #[test]
+    fn same_login_requires_known_user_and_workspace_and_prefers_subject() {
+        let mut left = account("Left", "team", "left");
+        let mut right = account("Right", "team", "right");
+        let set_identity = |account: &mut StoredAccount,
+                            workspace: &str,
+                            subject: Option<&str>,
+                            email: Option<&str>| {
+            if let AuthData::ChatGPT { id_token, .. } = &mut account.auth_data {
+                *id_token = id_token_with_identity(workspace, subject, email, "fixture");
+            }
+        };
+        set_identity(&mut left, "team", Some("alice"), Some("same@example.test"));
+        set_identity(&mut right, "team", Some("bob"), Some("same@example.test"));
+        assert!(!same_chatgpt_login(&left, &right));
+        set_identity(
+            &mut right,
+            "other-team",
+            Some("alice"),
+            Some("same@example.test"),
+        );
+        assert!(!same_chatgpt_login(&left, &right));
+        set_identity(&mut left, "team", None, Some("  Person@Example.test  "));
+        set_identity(&mut right, "team", None, Some("person@example.test"));
+        assert!(same_chatgpt_login(&left, &right));
+        set_identity(&mut left, "team", None, None);
+        set_identity(&mut right, "team", None, None);
+        assert!(!same_chatgpt_login(&left, &right));
+
+        let mut store = AccountsStore {
+            accounts: vec![left.clone()],
+            active_account_id: Some(left.id.clone()),
+            ..AccountsStore::default()
+        };
+        add_account_to_store(&mut store, right).unwrap();
+        assert_eq!(store.accounts.len(), 2);
+        assert_eq!(store.active_account_id.as_deref(), Some(left.id.as_str()));
     }
 
     #[test]
