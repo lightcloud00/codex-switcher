@@ -274,6 +274,8 @@ function seatFromUsage(
     probeError: usage?.probe_error ?? null,
     signedIn: usage?.signed_in ?? null,
     loginError: usage?.login_error ?? null,
+    loginExpiresAt: usage?.login_expires_at ?? null,
+    loginObservedAt: usage?.login_observed_at ?? null,
     status: seatStatus(usage),
     promState: null,
     lockOrphaned: false,

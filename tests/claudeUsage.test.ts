@@ -58,6 +58,29 @@ const NOW = Date.parse("2026-10-11T17:00:00Z");
 const buildClaudeSeats = (registry: Parameters<typeof buildSeats>[0], accounts: ClaudeUsageAccount[],
   prom?: ClaudePromSnapshot | null, nowMs = NOW) => buildSeats(registry, accounts, prom, nowMs);
 
+test("login expiry belongs to the selected profile and does not change usage or subscription dates", () => {
+  const usage: ClaudeUsageAccount = {
+    account: "mac-096-max", email: "same@example.com", five_hour: win({}), seven_day: win({}),
+    subscription_created_at: "2026-10-01T00:00:00Z", pool_spend_today_usd: null,
+    login_expires_at: "2026-10-10T01:02:03Z", login_observed_at: "2026-10-11T16:59:00Z",
+  };
+  const other: ClaudeUsageAccount = { ...usage, account: "mac-gustavo-max", login_expires_at: null, login_observed_at: null };
+  const seats = buildClaudeSeats([], [usage, other]);
+  const seat = seats.find(s => s.id === "claude-mac-096")!;
+  assert.equal(seat.loginExpiresAt, usage.login_expires_at);
+  assert.equal(seat.loginObservedAt, usage.login_observed_at);
+  assert.equal(seat.subscriptionCreatedAt, usage.subscription_created_at);
+  assert.equal(seat.fiveHour?.resets_at, usage.five_hour?.resets_at);
+  assert.equal(seat.status, "ok", "a passed expected login date alone is not proof of lost authentication");
+  assert.equal(seats.find(s => s.id === "claude-mac-gustavo")?.loginExpiresAt, null);
+});
+
+test("an older collector schema remains compatible without inventing login expiry", () => {
+  const seat = buildClaudeSeats(null, [{ account: "mac-max", five_hour: win({}), seven_day: win({}), pool_spend_today_usd: null }])[0];
+  assert.equal(seat.loginExpiresAt, null);
+  assert.equal(seat.loginObservedAt, null);
+});
+
 test("retained exhausted readings expire at the reset boundary without a successful refresh", () => {
   const resetAt = NOW + 60_000;
   const account: ClaudeUsageAccount = {
