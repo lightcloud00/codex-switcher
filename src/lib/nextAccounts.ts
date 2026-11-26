@@ -228,7 +228,7 @@ export function rowLine(entry: UseNextEntry, now: number, format: WhenFormat = {
       return `Back ${formatCountdown(toMs(row.back_at), now, format)}`;
     case "refresh_failed": {
       const failure = describeAuthFailure(account.usage?.error);
-      return failure ? SIGN_IN_LINE[failure.kind] : "Couldn't check usage · refresh or sign in again";
+      return failure ? SIGN_IN_LINE[failure.kind] : "Couldn't check usage · try refreshing";
     }
     case "expired":
       return `Plan ended ${formatDay(toMs(row.subscription_expires_at), now, format)} · renew to use`;

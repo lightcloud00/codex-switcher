@@ -5,29 +5,29 @@ export interface AuthFailure {
   message: string;
 }
 
-const AUTH_FAILURE_PATTERN = /\b401\b|\bunauthorized\b|invalid_grant|invalid_token|token_(?:expired|invalidated|revoked)|refresh_token_(?:reused|expired|invalidated)|(?:refresh|authentication) token[^\n]*(?:expired|invalid|revoked|reused)|missing refresh token/i;
-
-// Order matters: "ended" is checked before the others and before the bare 401 match.
+// A failed usage request, expired access token or malformed ID token does not
+// establish that the saved refresh grant is unusable. Only terminal renewal
+// evidence should send the user through sign-in again.
 const AUTH_FAILURES: { kind: AuthFailureKind; pattern: RegExp; message: string }[] = [
   {
     kind: "ended",
-    pattern: /refresh_token_invalidated|token_revoked|token_invalidated|session has ended/i,
-    message: "Session ended — you were signed out in Codex or elsewhere. Re-login to renew.",
+    pattern: /\brefresh_token_(?:invalidated|revoked)\b|\bsession has ended\b|Token refresh failed:[\s\S]*\btoken_(?:revoked|invalidated)\b/i,
+    message: "This saved sign-in can no longer be renewed. Re-login in Switcher.",
   },
   {
     kind: "expired",
-    pattern: /refresh_token_expired|token_expired/i,
-    message: "Session expired. Re-login to renew.",
+    pattern: /\brefresh_token_expired\b/i,
+    message: "This saved sign-in expired. Re-login in Switcher.",
   },
   {
     kind: "reused",
-    pattern: /refresh_token_reused/i,
-    message: "This login was renewed by another app. Re-login to renew.",
+    pattern: /\brefresh_token_reused\b/i,
+    message: "This saved sign-in was already renewed. Re-login in Switcher.",
   },
   {
     kind: "unauthorized",
-    pattern: AUTH_FAILURE_PATTERN,
-    message: "Your login needs renewing.",
+    pattern: /\binvalid_grant\b|\bmissing refresh token\b/i,
+    message: "This saved sign-in needs renewal. Re-login in Switcher.",
   },
 ];
 

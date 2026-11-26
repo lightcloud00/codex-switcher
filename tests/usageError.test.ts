@@ -23,7 +23,7 @@ test("429 usage limits are not authentication failures", () => {
   assert.equal(formatUsageError(error).title, "Rate limited, try again later");
 });
 
-test("upstream terminal refresh failures require removing and re-adding the account", () => {
+test("terminal refresh failures offer targeted re-login without deleting the account", () => {
   for (const error of [
     'Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_reused"}}',
     'Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_expired"}}',
@@ -33,7 +33,8 @@ test("upstream terminal refresh failures require removing and re-adding the acco
     assert.equal(needsRelogin(error), true, error);
     const shown = formatUsageError(error);
     assert.equal(shown.title, "Switcher sign-in needs renewal");
-    assert.match(shown.message, /Remove this account and add it again/);
+    assert.match(shown.message, /Use Re-login on this account/);
+    assert.doesNotMatch(shown.message, /remove|delete/i);
   }
 });
 

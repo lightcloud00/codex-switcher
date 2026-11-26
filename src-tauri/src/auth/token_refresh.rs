@@ -113,11 +113,21 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
         Utc::now().timestamp(),
     );
 
+    persist_refresh_update(&account.id, current_account_id, next)
+}
+
+/// Save a potentially single-use rotation and synchronize Codex's owned login
+/// before reporting an invalid replacement ID token. Callers hold AUTH_OPERATION_LOCK.
+fn persist_refresh_update(
+    account_id: &str,
+    current_account_id: Option<String>,
+    next: TokenRefreshUpdate,
+) -> Result<StoredAccount> {
     let claims = parse_chatgpt_id_token_claims(&next.id_token);
     let next_account_id = claims.account_id.or(current_account_id);
 
     let updated = update_account_chatgpt_tokens(
-        &account.id,
+        account_id,
         next.id_token,
         next.access_token,
         next.refresh_token,
@@ -127,12 +137,6 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
         claims.subscription_expires_at,
     )?;
     println!("[Auth] Refreshed OAuth tokens for: {}", updated.name);
-
-    // Refresh tokens can be single-use. Persist a rotated replacement before
-    // reporting an unusable ID token, so a later retry can still recover.
-    if let Some(error) = next.id_token_error {
-        return Err(error);
-    }
 
     // Re-read active state after the network request before touching auth.json.
     // The refreshed tokens are already saved, so an unreadable auth.json only
@@ -150,6 +154,12 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
         }
         Ok(_) => {}
         Err(err) => println!("[Auth] Skipped auth.json sync after token refresh: {err}"),
+    }
+
+    // Reconciliation treats the live login as authoritative. Returning earlier
+    // would let its spent refresh token overwrite the saved rotation next time.
+    if let Some(error) = next.id_token_error {
+        return Err(error);
     }
 
     Ok(updated)
@@ -403,11 +413,12 @@ mod tests {
     use super::{
         chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, codex_holds_account,
         codex_uses_account, load_account_reconciling_live_auth, merge_refresh_response,
-        resolve_refreshed_id_token, send_refresh_request, RefreshTokenResponse,
+        persist_refresh_update, resolve_refreshed_id_token, send_refresh_request,
+        RefreshTokenResponse, TokenRefreshUpdate,
     };
     use crate::auth::test_support::TestHome;
     use crate::auth::{
-        get_accounts_file, get_codex_auth_file, load_accounts,
+        get_accounts_file, get_codex_auth_file, load_accounts, read_current_auth,
         reconcile_active_account_with_live_auth, save_accounts, switch_to_account,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
@@ -696,6 +707,104 @@ mod tests {
         assert_eq!(update.id_token, current_id_token);
         assert_eq!(update.refresh_token, "rotated-refresh");
         assert!(update.id_token_error.is_none());
+    }
+
+    fn invalid_id_rotation(account: &StoredAccount, now: i64) -> TokenRefreshUpdate {
+        let AuthData::ChatGPT {
+            id_token,
+            refresh_token,
+            ..
+        } = &account.auth_data
+        else {
+            panic!("expected ChatGPT account");
+        };
+        merge_refresh_response(
+            id_token.clone(),
+            refresh_token.clone(),
+            RefreshTokenResponse {
+                id_token: Some("invalid-id-token".into()),
+                access_token: "rotated-access".into(),
+                refresh_token: Some("rotated-refresh".into()),
+            },
+            now,
+        )
+    }
+
+    fn assert_rotated_pair(account: &StoredAccount) {
+        let AuthData::ChatGPT {
+            access_token,
+            refresh_token,
+            ..
+        } = &account.auth_data
+        else {
+            panic!("expected ChatGPT account");
+        };
+        assert_eq!(access_token, "rotated-access");
+        assert_eq!(refresh_token, "rotated-refresh");
+    }
+
+    #[test]
+    fn invalid_id_rotation_survives_live_auth_reconciliation() {
+        let _home = TestHome::new();
+        let now = chrono::Utc::now().timestamp();
+        let account = chatgpt_account("Active", "workspace-a", now);
+        save_accounts(&AccountsStore {
+            accounts: vec![account.clone()],
+            active_account_id: Some(account.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+        switch_to_account(&account).unwrap();
+
+        let error = persist_refresh_update(
+            &account.id,
+            Some("workspace-a".into()),
+            invalid_id_rotation(&account, now),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid or expired id_token"));
+        let live = read_current_auth().unwrap().unwrap().tokens.unwrap();
+        assert_eq!(live.access_token, "rotated-access");
+        assert_eq!(live.refresh_token, "rotated-refresh");
+
+        let (reconciled, is_active) = load_account_reconciling_live_auth(&account.id).unwrap();
+        assert!(is_active);
+        assert_rotated_pair(&reconciled);
+        let saved = load_accounts().unwrap();
+        assert_rotated_pair(&saved.accounts[0]);
+        assert_eq!(
+            saved.active_account_id.as_deref(),
+            Some(account.id.as_str())
+        );
+    }
+
+    #[test]
+    fn invalid_id_rotation_preserves_foreign_live_auth() {
+        let _home = TestHome::new();
+        let now = chrono::Utc::now().timestamp();
+        let account = chatgpt_account("Active", "workspace-a", now);
+        save_accounts(&AccountsStore {
+            accounts: vec![account.clone()],
+            active_account_id: Some(account.id.clone()),
+            ..AccountsStore::default()
+        })
+        .unwrap();
+        // A separate login may replace live auth during the refresh request.
+        switch_to_account(&chatgpt_account("Foreign", "workspace-b", now)).unwrap();
+        let path = get_codex_auth_file().unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(persist_refresh_update(
+            &account.id,
+            Some("workspace-a".into()),
+            invalid_id_rotation(&account, now),
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let (reconciled, is_active) = load_account_reconciling_live_auth(&account.id).unwrap();
+        assert!(!is_active);
+        assert_rotated_pair(&reconciled);
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 //! Account management Tauri commands
 
+use crate::auth::storage::same_chatgpt_login;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
     import_from_auth_json, import_from_auth_json_contents, load_accounts, read_current_auth,
@@ -142,7 +143,9 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     // Import from the file
     let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
 
-    // Add to storage
+    // Keep identity deduplication, insertion and readback atomic with OAuth
+    // completion, token refresh and bulk imports.
+    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
@@ -157,6 +160,7 @@ pub async fn add_account_from_auth_json_text(
     contents: String,
 ) -> Result<AccountInfo, String> {
     let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
+    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
@@ -331,8 +335,7 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
         })?;
     validate_imported_store(&imported).map_err(|e| format!("{e:#}"))?;
 
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
+    let summary = merge_imported_accounts(imported).await?;
     Ok(ImportAccountsSummary {
         total_in_payload,
         imported_count: summary.imported_count,
@@ -383,6 +386,12 @@ pub async fn import_accounts_full_encrypted_bytes(
             .map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
+    merge_imported_accounts(imported).await
+}
+
+/// Network refresh and backup decoding happen before this boundary. Re-read
+/// under the auth lock so those waits cannot discard concurrent store updates.
+async fn merge_imported_accounts(imported: AccountsStore) -> Result<ImportAccountsSummary, String> {
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     let current = load_accounts().map_err(|e| e.to_string())?;
     let (merged, summary) = merge_accounts_store(current, imported);
@@ -838,7 +847,13 @@ fn merge_accounts_store(
         current.accounts.iter().map(|a| a.name.clone()).collect();
 
     for account in imported.accounts {
-        if existing_ids.contains(&account.id) || existing_names.contains(&account.name) {
+        if existing_ids.contains(&account.id)
+            || existing_names.contains(&account.name)
+            || current
+                .accounts
+                .iter()
+                .any(|saved| same_chatgpt_login(saved, &account))
+        {
             continue;
         }
         existing_ids.insert(account.id.clone());
@@ -886,6 +901,122 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod merge_identity_tests {
+    use super::*;
+
+    fn account(name: &str, workspace: &str, subject: Option<&str>) -> StoredAccount {
+        let claims = serde_json::json!({
+            "sub": subject,
+            "https://api.openai.com/auth": { "chatgpt_account_id": workspace }
+        });
+        StoredAccount::new_chatgpt(
+            name.into(),
+            None,
+            None,
+            None,
+            format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD.encode(claims.to_string())
+            ),
+            format!("access-{name}"),
+            format!("refresh-{name}"),
+            Some(workspace.into()),
+        )
+    }
+
+    #[test]
+    fn merge_skips_known_duplicate_logins_but_keeps_distinct_and_unknown_identities() {
+        let saved = account("Saved", "team", Some("alice"));
+        let saved_before = serde_json::to_value(&saved).unwrap();
+        let duplicate = account("Renamed backup", "team", Some("alice"));
+        let imported_active = duplicate.id.clone();
+        let other_user = account("Bob", "team", Some("bob"));
+        let duplicate_in_payload = account("Bob again", "team", Some("bob"));
+        let other_workspace = account("Other workspace", "other-team", Some("alice"));
+        let unknown = account("Unknown", "team", None);
+        let another_unknown = account("Another unknown", "team", None);
+        let (merged, summary) = merge_accounts_store(
+            AccountsStore {
+                accounts: vec![saved.clone()],
+                active_account_id: Some(saved.id.clone()),
+                ..AccountsStore::default()
+            },
+            AccountsStore {
+                accounts: vec![
+                    duplicate,
+                    other_user,
+                    duplicate_in_payload,
+                    other_workspace,
+                    unknown,
+                    another_unknown,
+                ],
+                active_account_id: Some(imported_active),
+                ..AccountsStore::default()
+            },
+        );
+        assert_eq!(summary.total_in_payload, 6);
+        assert_eq!(summary.imported_count, 4);
+        assert_eq!(summary.skipped_count, 2);
+        assert_eq!(merged.accounts.len(), 5);
+        assert_eq!(
+            serde_json::to_value(&merged.accounts[0]).unwrap(),
+            saved_before
+        );
+        assert_eq!(merged.active_account_id.as_deref(), Some(saved.id.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn import_waits_for_auth_lock_and_merges_the_latest_store() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let original = account("Original", "original-workspace", Some("alice"));
+        let added_while_waiting = account("New active", "new-workspace", Some("bob"));
+        let imported = account("Imported", "imported-workspace", Some("carol"));
+        let mut latest = AccountsStore {
+            accounts: vec![original.clone()],
+            active_account_id: Some(original.id.clone()),
+            ..AccountsStore::default()
+        };
+        save_accounts(&latest).unwrap();
+        let guard = AUTH_OPERATION_LOCK.lock().await;
+        let completed = std::cell::Cell::new(false);
+
+        let (result, ()) = tokio::join!(
+            biased;
+            async {
+                let result = merge_imported_accounts(AccountsStore {
+                    accounts: vec![imported.clone()],
+                    active_account_id: Some(imported.id.clone()),
+                    ..AccountsStore::default()
+                })
+                .await;
+                completed.set(true);
+                result
+            },
+            async {
+                // The import is polled first and must wait for our held guard.
+                tokio::task::yield_now().await;
+                assert!(!completed.get());
+                latest.accounts[0].name = "Renamed while waiting".into();
+                latest.accounts.push(added_while_waiting.clone());
+                latest.active_account_id = Some(added_while_waiting.id.clone());
+                save_accounts(&latest).unwrap();
+                drop(guard);
+            }
+        );
+
+        let summary = result.unwrap();
+        assert_eq!(summary.imported_count, 1);
+        assert_eq!(summary.skipped_count, 0);
+        let merged = load_accounts().unwrap();
+        assert_eq!(merged.accounts.len(), 3);
+        assert_eq!(merged.accounts[0].name, "Renamed while waiting");
+        assert_eq!(merged.accounts[1].id, added_while_waiting.id);
+        assert_eq!(merged.accounts[2].id, imported.id);
+        assert_eq!(merged.active_account_id, Some(added_while_waiting.id));
+    }
 }
 
 #[cfg(test)]

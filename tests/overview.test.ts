@@ -268,7 +268,7 @@ test("Codex status: expired wins, a broken login says so, another usage error do
     return [r.status, r.tone, r.inactive];
   };
   assert.deepEqual(status({ usage: usage({ error: "refresh_token_invalidated" }) }), [SIGN_IN_AGAIN, "bad", false]);
-  assert.deepEqual(status({ usage: usage({ error: "HTTP 401 Unauthorized" }) }), [SIGN_IN_AGAIN, "bad", false]);
+  assert.deepEqual(status({ usage: usage({ error: "HTTP 401 Unauthorized" }) }), ["usage error", "warn", false]);
   assert.deepEqual(status({ usage: usage({ error: "network unreachable" }) }), ["usage error", "warn", false]);
   assert.deepEqual(
     status({ subscription_expires_at: "2026-10-01T00:00:00Z", usage: usage({ error: "refresh_token_invalidated" }) }),

@@ -4,6 +4,7 @@ import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
 import { describeAuthFailure } from "../lib/accountAuth";
+import { accountHealth, lastCheckedText, validDate } from "../lib/accountHealth";
 import { getResetCreditsDisplayCount, queueResetCreditsCheck } from "../lib/resetCredits";
 import { UsageBar } from "./UsageBar";
 
@@ -30,36 +31,25 @@ interface AccountCardProps {
   onToggleAutoWarmup?: () => void;
 }
 
-function formatLastRefresh(date: Date | null): string {
-  if (!date) return "Never";
-  const now = new Date();
-  const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (diff < 5) return "Just now";
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return date.toLocaleDateString();
-}
-
-function getSubscriptionStatus(timestamp: string | null | undefined): {
+function getSubscriptionStatus(timestamp: string | null | undefined, nowMs: number): {
   label: string;
   className: string;
 } {
-  if (!timestamp) {
+  const expiryDate = validDate(timestamp);
+  if (!expiryDate) {
     return {
       label: "Expiry unavailable",
       className: "text-gray-400 dark:text-gray-500",
     };
   }
 
-  const expiryDate = new Date(timestamp);
   const formattedDate = new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
   }).format(expiryDate);
 
-  const remainingMs = expiryDate.getTime() - Date.now();
+  const remainingMs = expiryDate.getTime() - nowMs;
   if (remainingMs <= 0) {
     return {
       label: `Expired ${formattedDate}`,
@@ -118,9 +108,8 @@ export function AccountCard({
   onToggleAutoWarmup,
 }: AccountCardProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(
-    account.usage && !account.usage.error ? new Date() : null
-  );
+  const [, rerenderClock] = useState(0);
+  const nowMs = Date.now();
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(account.name);
   const [resetCredits, setResetCredits] = useState<AccountResetCredits | null>(null);
@@ -165,10 +154,9 @@ export function AccountCard({
   }, [isEditing]);
 
   useEffect(() => {
-    if (account.usage && !account.usage.error) {
-      setLastRefresh(new Date());
-    }
-  }, [account.usage]);
+    const timer = setInterval(() => rerenderClock((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -222,7 +210,14 @@ export function AccountCard({
   const planColorClass = planColors[planKey] || planColors.free;
   const showSubscriptionStatus =
     account.auth_mode === "chat_g_p_t" && account.plan_type?.toLowerCase() !== "free";
-  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
+  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at, nowMs);
+  const health = accountHealth(account, nowMs);
+  const healthClass = {
+    ok: "bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300",
+    warn: "bg-amber-50 text-amber-800 dark:bg-amber-900/20 dark:text-amber-300",
+    bad: "bg-red-50 text-red-800 dark:bg-red-900/20 dark:text-red-300",
+    muted: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
+  }[health.tone];
   const compactResetCredits = !account.is_active;
   const authFailure =
     account.auth_mode === "chat_g_p_t" ? describeAuthFailure(account.usage?.error) : null;
@@ -401,12 +396,25 @@ export function AccountCard({
         )}
       </div>
 
+      <div className="mb-2" role="status">
+        <span
+          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${healthClass}`}
+          title={health.detail}
+          aria-label={`${health.label}. ${health.detail}`}
+        >
+          {health.label}
+        </span>
+      </div>
+
       {/* Usage */}
       <div className="mb-3 empty:hidden">
         <UsageBar
           usage={account.usage}
           loading={isRefreshing || account.usageLoading}
           hideError={!!authFailure}
+          checkedAt={account.usageCheckedAt}
+          nowMs={nowMs}
+          unsupported={account.auth_mode === "api_key"}
         />
       </div>
 
@@ -429,7 +437,7 @@ export function AccountCard({
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">
         <div className="text-gray-400 dark:text-gray-500">
-          Last updated: {formatLastRefresh(lastRefresh)}
+          Last checked: {lastCheckedText(account.usageCheckedAt, nowMs)}
         </div>
         {showSubscriptionStatus && (
           <div className={`text-right ${subscriptionStatus.className}`}>

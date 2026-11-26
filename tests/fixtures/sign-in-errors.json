@@ -1,15 +1,25 @@
 {
   "failures": [
-    "API error: 401 Unauthorized",
     "Token refresh failed: invalid_grant",
     "refresh_token_reused",
     "refresh_token_expired",
-    "token_revoked",
-    "token_invalidated",
-    "missing refresh token",
-    "HTTP 401"
+    "refresh_token_revoked",
+    "refresh_token_invalidated",
+    "Token refresh failed: 401 - token_revoked",
+    "Your session has ended",
+    "missing refresh token"
   ],
   "others": [
+    "API error: 401 Unauthorized",
+    "HTTP 401",
+    "invalid_token",
+    "token_expired",
+    "token_revoked",
+    "token_invalidated",
+    "Token refresh failed: 401 Unauthorized - ",
+    "Token refresh returned an invalid or expired id_token",
+    "not_invalid_grant",
+    "refresh_token_expired_later",
     "API error: 403 Forbidden",
     "API error: 429 Too Many Requests",
     "API error: 500 Internal Server Error",
