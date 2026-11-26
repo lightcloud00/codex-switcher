@@ -6,6 +6,7 @@ import { claudeSubscriptionText, withSeatSubscriptions, type SeatSubscriptions }
 import { planDatesText } from "../lib/overview";
 import { checkedLine, newestSeatReadingAgeS } from "../lib/checkedAgo";
 import { claudeWindowMetrics } from "../lib/claudeWindowMetrics";
+import { claudeLoginExpiry } from "../lib/claudeLoginExpiry";
 import type { PlanDates } from "../lib/providerAccess";
 import {
   buildClaudeSeats,
@@ -103,7 +104,7 @@ function CopyLauncherButton({ command }: { command: string }) {
     <button
       onClick={copy}
       title={command}
-      className="h-7 rounded-lg border border-gray-200 px-2.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-neutral-900"
+      className="h-7 shrink-0 whitespace-nowrap rounded-lg border border-gray-200 px-2.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-neutral-900"
     >
       {state === "copied" ? "Copied" : state === "failed" ? "Clipboard unavailable" : "Copy launcher command"}
     </button>
@@ -137,6 +138,7 @@ function SeatCard({
   const noReading = seat.status === "unknown" && !hasLiveWindow(seat) && !hasResetDetails;
   const lastKnown = noReading ? lastKnownLine(seat, now) : "";
   const showHealth = Boolean(seat.promState) && seat.promState !== "ok";
+  const loginExpiry = claudeLoginExpiry(seat, now);
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="mb-3 flex items-start justify-between gap-2">
@@ -151,7 +153,7 @@ function SeatCard({
           )}
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400"
             title={savedDateText ? "Dates saved under Providers, or the end date in the fleet seat file." : "Estimated from the recorded subscription start date assuming monthly billing. Claude does not provide a confirmed expiry date here."}>
-            {savedDateText || (savedDates?.billingInterval === "annual" ? "Annual billing · renewal not recorded" : savedDates?.billingInterval === "none" ? "Free · no paid expiry" : claudeSubscriptionText(seat, now))}
+            Plan: {savedDateText || (savedDates?.billingInterval === "annual" ? "Annual billing · renewal not recorded" : savedDates?.billingInterval === "none" ? "Free · no paid expiry" : claudeSubscriptionText(seat, now))}
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
@@ -191,6 +193,12 @@ function SeatCard({
             </span>
           ) : null}
         </div>
+      </div>
+      <div className="mb-3 space-y-1 text-xs" title="Claude Code reports an expected sign-in end range. Usage does not extend it. This is separate from subscription renewal and usage resets.">
+        <p className={loginExpiry.warning ? "text-amber-700 dark:text-amber-300" : "text-gray-600 dark:text-gray-300"}>
+          {loginExpiry.label}
+        </p>
+        <p className="text-[11px] text-gray-500 dark:text-gray-400">{loginExpiry.observation}</p>
       </div>
       {signInRequired ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">The last usage check reported a sign-in problem. Current sign-in status and limits need verification.</p>

@@ -180,6 +180,10 @@ export interface ClaudeUsageAccount {
   /** Cached probe result; the producer does not expose its authentication observation time. */
   signed_in?: boolean | null;
   login_error?: string | null;
+  /** Latest expected end of this profile's stored login, from supported Claude auth status. */
+  login_expires_at?: string | null;
+  /** When login metadata was read; independent of usage-window and summary timestamps. */
+  login_observed_at?: string | null;
 }
 
 export interface ClaudeWorkerRoute {
@@ -265,6 +269,8 @@ export interface ClaudeSeat {
   /** Cached sign-in evidence, not a claim about the account's current authentication. */
   signedIn?: boolean | null;
   loginError?: string | null;
+  loginExpiresAt?: string | null;
+  loginObservedAt?: string | null;
   /** Registry seat id ("claude-mac-096"); the claude-usage account label in usage-only mode. */
   id: string;
   /** "mac", "win" or "wsl" when known. */
